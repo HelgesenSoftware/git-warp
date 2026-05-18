@@ -10,9 +10,11 @@
     history.replaceState(null, "", "/");
   }
   const TOKEN = localStorage.getItem("git_history_token") || "";
-  document.getElementById("log-link").href = "/log?t=" + encodeURIComponent(TOKEN);
+  if (params.get("dark") === "1") document.body.classList.add("dark");
+  document.getElementById("log-link").href = "/log";
 
   // ---- State ----
+  const INDEX_HASH = "index";
   let state = null;         // latest server state
   let selected = new Set(); // set of selected hashes
   let anchor = null;        // shift-click anchor hash
@@ -26,6 +28,7 @@
   const $spinner     = document.getElementById("spinner");
   const $btnUndo     = document.getElementById("btn-undo");
   const $btnRedo     = document.getElementById("btn-redo");
+  const $btnReword   = document.getElementById("btn-reword");
   const $btnStash    = document.getElementById("btn-stash");
   const $btnStashPop = document.getElementById("btn-stash-pop");
   const $btnRefresh  = document.getElementById("btn-refresh");
@@ -34,8 +37,6 @@
   const $commitsList = document.getElementById("commits-list");
   const $branchHistoryList  = document.getElementById("branch-history-list");
   const $branchHistoryTitle  = document.getElementById("branch-history-title-text");
-  const $commitsTitle = document.getElementById("commits-title-text");
-  const $groupConsecRebases = document.getElementById("group-consec-rebases");
   const $conflictModal = document.getElementById("conflict-modal");
   const $submoduleModal = document.getElementById("submodule-modal");
   const $conflictFiles = document.getElementById("conflict-files");
@@ -68,6 +69,14 @@
   function apiGet(url)        { return api("GET", url); }
   function apiPost(url, body) { return api("POST", url, body); }
 
+  async function withSpinner(fn) {
+    if (busy) return;
+    showSpinner();
+    try { return await fn(); }
+    catch (err) { showBanner("Request failed: " + err.message, "error"); }
+    finally { hideSpinner(); }
+  }
+
   // ---- Spinner ----
   function showSpinner() { busy = true; $spinner.classList.remove("hidden"); $branchSelect.disabled = true; }
   function hideSpinner() { busy = false; $spinner.classList.add("hidden"); $branchSelect.disabled = !!(state && (state.dirty || state.rebase_in_progress)); }
@@ -82,8 +91,7 @@
   // ---- Render ----
   function render() {
     if (!state) return;
-    $branchHistoryTitle.textContent  = (state.branch || "(detached)") + " Branch History";
-    $commitsTitle.textContent = (state.branch || "(detached)") + " Commit History";
+    $branchHistoryTitle.textContent = "Branch History (Last " + state.reflog_expiry + ")";
 
     // Branch dropdown
     $branchSelect.innerHTML = "";
@@ -130,8 +138,12 @@
       $conflictModal.classList.add("hidden");
     }
 
+    const headHash = state.commits.length > 0 ? state.commits[0].commit_hash : "";
+    const entries = state.branch_history || [];
+    branchHistoryEntries = entries;
+    headBranchHistoryIdx = entries.findIndex(function (e) { return e.commit_hash === headHash; });
     renderCommits();
-    renderBranchHistory();
+    renderBranchHistory(entries, headBranchHistoryIdx);
     updateActionBar();
   }
 
@@ -160,7 +172,11 @@
       const handle = document.createElement("span");
       handle.className = "drag-handle";
       handle.textContent = "\u2807";
-      handle.addEventListener("mousedown", onDragStart);
+      if (c.commit_hash !== INDEX_HASH) {
+        handle.addEventListener("mousedown", onDragStart);
+      } else {
+        handle.style.visibility = "hidden";
+      }
       row.appendChild(handle);
 
       // Cloud indicator for pushed commits
@@ -180,8 +196,8 @@
       badges.className = "badges";
       c.branches.forEach(function (b) {
         const s = document.createElement("span");
-        s.className = "badge-branch";
-        s.textContent = b;
+        s.className = b === INDEX_HASH ? "badge-index" : "badge-branch";
+        s.textContent = b === INDEX_HASH ? "Index" : b;
         badges.appendChild(s);
       });
       c.tags.forEach(function (t) {
@@ -196,7 +212,6 @@
       const msg = document.createElement("span");
       msg.className = "message";
       msg.textContent = c.message;
-      msg.addEventListener("dblclick", function () { startReword(row, c); });
       row.appendChild(msg);
 
       // Author
@@ -208,7 +223,7 @@
       // Date
       const dt = document.createElement("span");
       dt.className = "date";
-      dt.textContent = c.date ? c.date.slice(0, 10) : "";
+      dt.textContent = c.date ? c.date.slice(0, 16) : "";
       row.appendChild(dt);
 
       // Row actions
@@ -219,7 +234,7 @@
       btnFixup.innerHTML = '<img src="/static/fixup.png" width="18" height="18" alt="Fixup">';
       btnFixup.title = "Fixup";
       btnFixup.className = "btn-fixup";
-      btnFixup.disabled = mutDisabled || idx === state.commits.length - 1;
+      btnFixup.disabled = mutDisabled || c.commit_hash === INDEX_HASH || idx === state.commits.length - 1;
       btnFixup.addEventListener("click", function (e) {
         e.stopPropagation();
         doRebase("fixup", {commit_hashes: [c.commit_hash]}, idx - 1);
@@ -234,30 +249,22 @@
         onRowClick(c.commit_hash, idx, e);
       });
 
+      row.addEventListener("dblclick", function (e) {
+        if (e.target.closest(".row-actions") || e.target.closest(".drag-handle")) return;
+        e.preventDefault();
+        if (c.commit_hash !== INDEX_HASH && !c.is_head) doReset(c.commit_hash);
+      });
+
       $commitsList.appendChild(row);
     });
   }
 
-  function renderBranchHistory() {
+  function renderBranchHistory(entries, headIdx) {
     $branchHistoryList.innerHTML = "";
-    if (!state.branch_history) return;
-    let entries = state.branch_history;
-    if ($groupConsecRebases.checked) {
-      const filtered = [];
-      let lastLabel = null;
-      entries.forEach(function (entry) {
-        if (entry.label === "rebase" && lastLabel === "rebase") return;
-        filtered.push(entry);
-        lastLabel = entry.label;
-      });
-      entries = filtered;
-    }
     const headHash = state.commits.length > 0 ? state.commits[0].commit_hash : "";
-    branchHistoryEntries = entries;
-    headBranchHistoryIdx = entries.findIndex(function (e) { return e.commit_hash === headHash; });
     const canMutate = !state.dirty && !state.rebase_in_progress && !!state.branch;
-    $btnUndo.disabled = !canMutate || headBranchHistoryIdx === -1 || headBranchHistoryIdx === entries.length - 1;
-    $btnRedo.disabled = !canMutate || headBranchHistoryIdx <= 0;
+    $btnUndo.disabled = !canMutate || headIdx === -1 || headIdx === entries.length - 1;
+    $btnRedo.disabled = !canMutate || headIdx <= 0;
     entries.forEach(function (entry) {
       const isHead = entry.commit_hash === headHash;
       const row = document.createElement("div");
@@ -268,13 +275,6 @@
       hashSpan.textContent = entry.commit_hash.slice(0, 7);
       row.appendChild(hashSpan);
 
-      if (isHead && state.branch) {
-        const badge = document.createElement("span");
-        badge.className = "badge-branch";
-        badge.textContent = state.branch;
-        row.appendChild(badge);
-      }
-
       const labelSpan = document.createElement("span");
       labelSpan.className = "branch-history-label";
       labelSpan.textContent = entry.label;
@@ -282,7 +282,7 @@
 
       const tsSpan = document.createElement("span");
       tsSpan.className = "branch-history-timestamp";
-      tsSpan.textContent = entry.timestamp ? entry.timestamp.slice(0, 10) : "";
+      tsSpan.textContent = entry.timestamp ? entry.timestamp.slice(0, 16) : "";
       row.appendChild(tsSpan);
 
       row.addEventListener("dblclick", function (e) {
@@ -294,6 +294,11 @@
   }
 
   // ---- Selection ----
+  function setSingleSelection(hash) {
+    selected = new Set([hash]);
+    anchor = hash;
+  }
+
   function applySelectionClasses() {
     document.querySelectorAll(".commit-row").forEach(function (r) {
       r.classList.toggle("selected", selected.has(r.dataset.commitHash));
@@ -301,10 +306,11 @@
   }
 
   function onRowClick(hash, idx, e) {
-    if (e.shiftKey && anchor !== null) {
-      // Extend selection contiguously from anchor.
+    if (hash === INDEX_HASH) {
+      setSingleSelection(INDEX_HASH);
+    } else if (e.shiftKey && anchor !== null) {
       const anchorIdx = state.commits.findIndex(function (c) { return c.commit_hash === anchor; });
-      if (anchorIdx === -1) { anchor = hash; selected = new Set([hash]); }
+      if (anchorIdx === -1) { setSingleSelection(hash); }
       else {
         const lo = Math.min(anchorIdx, idx);
         const hi = Math.max(anchorIdx, idx);
@@ -312,27 +318,28 @@
         for (let i = lo; i <= hi; i++) selected.add(state.commits[i].commit_hash);
       }
     } else {
-      selected = new Set([hash]);
-      anchor = hash;
-      showDiff(hash);
+      setSingleSelection(hash);
     }
+    showDiff(hash);
     applySelectionClasses();
     updateActionBar();
   }
 
   function updateActionBar() {
-    if (selected.size >= 2) {
-      $btnSquash.classList.remove("hidden");
-      const mutDisabled = state.dirty || state.rebase_in_progress || !state.branch;
-      $btnSquash.disabled = mutDisabled;
-    } else {
-      $btnSquash.classList.add("hidden");
-    }
+    const mutDisabled = state.dirty || state.rebase_in_progress || !state.branch;
+    const showReword = selected.size === 1;
+    const showSquash = selected.size >= 2 && !selected.has(INDEX_HASH);
+
+    $btnReword.classList.toggle("hidden", !showReword);
+    if (showReword) $btnReword.disabled = mutDisabled;
+
+    $btnSquash.classList.toggle("hidden", !showSquash);
+    if (showSquash) $btnSquash.disabled = mutDisabled;
   }
 
   // ---- Reword ----
   function startReword(row, commit) {
-    if (state.dirty || state.rebase_in_progress || busy) return;
+    if (commit.commit_hash === INDEX_HASH || state.dirty || state.rebase_in_progress || busy) return;
     const msgEl = row.querySelector(".message");
     const ta = document.createElement("textarea");
     ta.className = "reword-input";
@@ -450,8 +457,10 @@
     const newOrder = rows.map(function (r) { return r.dataset.commitHash; });
     const originalOrder = originalRows.map(function (r) { return r.dataset.commitHash; });
 
-    if (newOrder.join(",") === originalOrder.join(",")) return;
-    doRebase("move", {order: newOrder}, selected.size === 1 ? newOrder.indexOf([...selected][0]) : null);
+    const newOrderFiltered = newOrder.filter(function (h) { return h !== INDEX_HASH; });
+    const originalOrderFiltered = originalOrder.filter(function (h) { return h !== INDEX_HASH; });
+    if (newOrderFiltered.join(",") === originalOrderFiltered.join(",")) return;
+    doRebase("move", {order: newOrderFiltered}, selected.size === 1 ? newOrderFiltered.indexOf([...selected][0]) : null);
   }
 
   // ---- Diff resize ----
@@ -490,43 +499,26 @@
 
   // ---- API actions ----
   async function doRebase(operation, params, selectIdx) {
-    if (busy) return;
-    showSpinner();
-    try {
-      const body = Object.assign({operation: operation}, params);
-      const data = await apiPost("/api/rebase", body);
-      handleResponse(data, selectIdx);
-    } catch (err) {
-      showBanner("Request failed: " + err.message, "error");
-    }
-    hideSpinner();
+    const body = Object.assign({operation: operation}, params);
+    const data = await withSpinner(() => apiPost("/api/rebase", body));
+    if (data) handleResponse(data, selectIdx);
   }
 
   async function refreshState() {
-    if (busy) return;
-    showSpinner();
-    try {
-      const data = await apiGet("/api/state");
-      handleResponse(data);
-    } catch (err) {
-      showBanner("Request failed: " + err.message, "error");
-    }
-    hideSpinner();
+    const data = await withSpinner(() => apiGet("/api/state"));
+    if (data) handleResponse(data);
   }
 
   function handleResponse(data, selectIdx) {
     if (data.ok || data.conflict) {
       state = data;
-      // Prune selection to commits that still exist.
-      const validHashes = new Set(state.commits.map(function (c) { return c.commit_hash; }));
-      selected = new Set(Array.from(selected).filter(function (h) { return validHashes.has(h); }));
+      const validHashes = new Set(state.commits.map(c => c.commit_hash));
+      selected = new Set(Array.from(selected).filter(h => validHashes.has(h)));
       if (selectIdx != null) {
         const idx = Math.max(0, Math.min(selectIdx, state.commits.length - 1));
-        selected = new Set([state.commits[idx].commit_hash]);
-        anchor = state.commits[idx].commit_hash;
+        setSingleSelection(state.commits[idx].commit_hash);
       } else if (selected.size === 0 && state.commits.length > 0) {
-        selected = new Set([state.commits[0].commit_hash]);
-        anchor = state.commits[0].commit_hash;
+        setSingleSelection(state.commits[0].commit_hash);
       }
       clearBanner();
       render();
@@ -542,50 +534,33 @@
 
   // ---- Event wiring ----
   async function doReset(hash) {
-    if (busy) return;
-    showSpinner();
-    try {
-      const data = await apiPost("/api/reset", {commit_hash: hash});
+    const data = await withSpinner(() => apiPost("/api/reset", {commit_hash: hash}));
+    if (data) {
       handleResponse(data);
       if (data.ok && data.submodule_update_suggested) {
         hideSpinner();
         showSubmoduleModal(async () => {
-          showSpinner();
-          handleResponse(await apiPost("/api/submodule/update"));
-          hideSpinner();
+          const subData = await withSpinner(() => apiPost("/api/submodule/update"));
+          if (subData) handleResponse(subData);
         });
-        return;
       }
-    } catch (err) { showBanner("Reset failed: " + err.message, "error"); }
-    hideSpinner();
+    }
   }
 
-  $btnUndo.addEventListener("click", function () {
-    if ($btnUndo.disabled || headBranchHistoryIdx === -1) return;
-    doReset(branchHistoryEntries[headBranchHistoryIdx + 1].commit_hash);
-  });
-
-  $btnRedo.addEventListener("click", function () {
-    if ($btnRedo.disabled || headBranchHistoryIdx <= 0) return;
-    doReset(branchHistoryEntries[headBranchHistoryIdx - 1].commit_hash);
-  });
+  $btnUndo.addEventListener("click", () => doReset(branchHistoryEntries[headBranchHistoryIdx + 1].commit_hash));
+  $btnRedo.addEventListener("click", () => doReset(branchHistoryEntries[headBranchHistoryIdx - 1].commit_hash));
 
   $btnRefresh.addEventListener("click", refreshState);
 
-  $btnStash.addEventListener("click", async function () {
-    if (busy) return;
-    showSpinner();
-    try { handleResponse(await apiPost("/api/stash")); }
-    catch (err) { showBanner("Stash failed: " + err.message, "error"); }
-    hideSpinner();
-  });
+  $btnStash.addEventListener("click", () => withSpinner(() => apiPost("/api/stash")).then(d => d && handleResponse(d)));
+  $btnStashPop.addEventListener("click", () => withSpinner(() => apiPost("/api/stash/pop")).then(d => d && handleResponse(d)));
 
-  $btnStashPop.addEventListener("click", async function () {
-    if (busy) return;
-    showSpinner();
-    try { handleResponse(await apiPost("/api/stash/pop")); }
-    catch (err) { showBanner("Stash pop failed: " + err.message, "error"); }
-    hideSpinner();
+  $btnReword.addEventListener("click", function () {
+    if (selected.size !== 1) return;
+    const hash = [...selected][0];
+    const row = $commitsList.querySelector('[data-commit-hash="' + hash + '"]');
+    const commit = state.commits.find(function (c) { return c.commit_hash === hash; });
+    if (row && commit) startReword(row, commit);
   });
 
   $btnSquash.addEventListener("click", function () {
@@ -600,21 +575,8 @@
     document.body.innerHTML = "<p>Server stopped. Close this tab.</p>";
   });
 
-  $btnAbort.addEventListener("click", async function () {
-    if (busy) return;
-    showSpinner();
-    try { handleResponse(await apiPost("/api/rebase/abort")); }
-    catch (err) { showBanner("Abort failed: " + err.message, "error"); }
-    hideSpinner();
-  });
-
-  $btnContinue.addEventListener("click", async function () {
-    if (busy) return;
-    showSpinner();
-    try { handleResponse(await apiPost("/api/rebase/continue")); }
-    catch (err) { showBanner("Continue failed: " + err.message, "error"); }
-    hideSpinner();
-  });
+  $btnAbort.addEventListener("click", () => withSpinner(() => apiPost("/api/rebase/abort")).then(d => d && handleResponse(d)));
+  $btnContinue.addEventListener("click", () => withSpinner(() => apiPost("/api/rebase/continue")).then(d => d && handleResponse(d)));
 
   // Keyboard shortcuts
   document.addEventListener("keydown", function (e) {
@@ -625,41 +587,28 @@
   });
 
   $branchSelect.addEventListener("change", async function () {
-    if (busy) return;
     selected.clear();
     anchor = null;
-    showSpinner();
-    try {
-      const data = await apiPost("/api/switch", {branch: this.value});
+    const data = await withSpinner(() => apiPost("/api/switch", {branch: this.value}));
+    if (data) {
       handleResponse(data);
       if (data.ok && data.submodule_update_suggested) {
         hideSpinner();
         showSubmoduleModal(async () => {
-          showSpinner();
-          handleResponse(await apiPost("/api/submodule/update"));
-          hideSpinner();
+          const subData = await withSpinner(() => apiPost("/api/submodule/update"));
+          if (subData) handleResponse(subData);
         });
-        return;
       }
-    } catch (err) { showBanner("Switch failed: " + err.message, "error"); }
-    hideSpinner();
+    }
   });
 
-  $groupConsecRebases.addEventListener("change", renderBranchHistory);
-
-  // Help modal
-  document.getElementById("commits-help-btn").addEventListener("click", function () {
-    $commitsHelpModal.classList.remove("hidden");
-  });
-  document.getElementById("commits-help-close").addEventListener("click", function () {
-    $commitsHelpModal.classList.add("hidden");
-  });
-  document.getElementById("branch-history-help-btn").addEventListener("click", function () {
-    $branchHistoryHelpModal.classList.remove("hidden");
-  });
-  document.getElementById("branch-history-help-close").addEventListener("click", function () {
-    $branchHistoryHelpModal.classList.add("hidden");
-  });
+  // Help modals
+  function setupHelpModal(btnId, closeId, modal) {
+    document.getElementById(btnId).addEventListener("click", () => modal.classList.remove("hidden"));
+    document.getElementById(closeId).addEventListener("click", () => modal.classList.add("hidden"));
+  }
+  setupHelpModal("commits-help-btn", "commits-help-close", $commitsHelpModal);
+  setupHelpModal("branch-history-help-btn", "branch-history-help-close", $branchHistoryHelpModal);
 
   // Auto-refresh on window focus
   window.addEventListener("focus", refreshState);

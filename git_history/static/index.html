@@ -10,28 +10,31 @@
 <body>
 <div id="banner"></div>
 <div id="spinner" class="hidden"><div class="spinner-dot"></div></div>
-<div id="toolbar">
-  <img src="/static/logo.svg" id="toolbar-logo" alt="git-history">
-  <select id="branch-select"></select>
-  <span id="toolbar-right">
-    <button id="btn-squash" class="hidden">Squash</button>
-    <button id="btn-stash" class="hidden">Stash</button>
-    <button id="btn-stash-pop" class="hidden">Stash Pop</button>
-    <button id="btn-refresh">Refresh</button>
-    <button id="btn-quit" title="Quit">&times;</button>
-  </span>
-</div>
 <div id="columns">
   <div id="commits-panel">
-    <h2 id="commits-title"><span id="commits-title-text">Commit History</span><button id="commits-help-btn" title="Help">?</button></h2>
+    <div id="toolbar">
+      <img src="/static/logo-light.svg" id="toolbar-logo-light" alt="git-history" class="toolbar-logo">
+      <img src="/static/logo-dark.svg" id="toolbar-logo-dark" alt="git-history" class="toolbar-logo">
+      <label for="branch-select">Branch:</label>
+      <select id="branch-select"></select>
+      <span id="toolbar-right">
+        <button id="btn-reword" class="hidden" title="Reword selected commit message">Reword</button>
+        <button id="btn-squash" class="hidden" title="Squash selected commits into one">Squash</button>
+        <button id="btn-stash" class="hidden" title="Stash uncommitted changes">Stash</button>
+        <button id="btn-stash-pop" class="hidden" title="Restore stashed changes">Stash Pop</button>
+        <button id="btn-refresh" title="Reload commit list">Refresh</button>
+        <button id="commits-help-btn" title="Help">?</button>
+      </span>
+    </div>
     <div id="commits-list"></div>
   </div>
   <div id="branch-history-panel">
-    <h2 id="branch-history-title"><span id="branch-history-title-text">Branch History</span><button id="branch-history-help-btn" title="Help">?</button></h2>
-    <div id="branch-history-controls">
-      <button id="btn-undo" title="Undo">↶</button>
-      <button id="btn-redo" title="Redo">↷</button>
-      <label><input type="checkbox" id="group-consec-rebases"> Group consecutive rebases</label>
+    <div id="branch-history-header">
+      <div id="branch-history-buttons">
+        <button id="btn-undo" title="Undo">↶</button>
+        <button id="btn-redo" title="Redo">↷</button>
+      </div>
+      <h2 id="branch-history-title"><span id="branch-history-title-text">Branch History</span><button id="branch-history-help-btn" title="Help">?</button><button id="btn-quit" title="Quit">&times;</button></h2>
     </div>
     <div id="branch-history-list"></div>
   </div>
@@ -60,8 +63,6 @@
       <li>When two or more commits are selected, click the Squash button to combine them into a single commit where the commit message is the combined messages of all the commits.</li>
     </ul>
     <p>If a rebase produces a merge conflict, a dialog will appear letting you resolve the conflict in your editor and then continue, or abort and return to the original state.</p>
-    <p>There is a Refresh button, but you will not need it often as the commit list refreshes automatically when you switch back to this tab.</p>
-    <p>The Quit button in the top-right stops the git-history server and attempts to close the tab. Closing the browser tab without clicking the Quit button will not stop the git-history server. It can still be stopped by ctrl-c in the CMD window</p>
     <p><em>Tip: drag related commits together first, then use squash or fixup.</em></p>
     <div class="modal-actions">
       <button id="commits-help-close">Close</button>

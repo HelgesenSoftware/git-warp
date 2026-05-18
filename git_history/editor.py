@@ -30,8 +30,9 @@ def main():
     try:
         with open(src, "rb") as f:
             data = f.read()
-    except OSError:
-        return
+    except OSError as e:
+        print(f"error: failed to read {src}: {e}", file=sys.stderr)
+        sys.exit(1)
     with open(target, "wb") as f:
         f.write(data)
 

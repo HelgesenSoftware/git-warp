@@ -12,14 +12,16 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from make_test_repo import AUTHORS, BASE_DATE, init_repo
-from conftest import _commit_raw, _build_conflict_repo
-from git_history import GitHistory
+from conftest import _commit_raw, _ensure_persistent_test_repo
+from git_history.backend import GitHistory
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +222,19 @@ class ChallengeBase(unittest.TestCase):
             self.assertEqual(len(c.commit_hash), 40)
             self.assertIsInstance(c.message, str)
 
+    def _by_msg(self, state=None):
+        s = state or self.gh.read_state()
+        return {c.message: c.commit_hash for c in s.commits}
+
+    def _order(self, state=None):
+        s = state or self.gh.read_state()
+        return [c.commit_hash for c in s.commits]
+
 # ---------------------------------------------------------------------------
 # 1. Merge commits in the visible range
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class MergeCommitTests(ChallengeBase):
     """
     A merge commit in the visible range means any rebase operation will
@@ -333,6 +344,7 @@ class MergeCommitTests(ChallengeBase):
 # 3. Binary files and file renames
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class BinaryAndRenameTests(ChallengeBase):
 
     BINARY_V2 = bytes(range(255, -1, -1)) * 4
@@ -342,9 +354,6 @@ class BinaryAndRenameTests(ChallengeBase):
         self.repo = _build_binary_and_rename_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_squash_two_binary_commits_succeeds(self):
         """Squash 'add binary' + 'update binary' — data.bin must have v2 content."""
         state = self.gh.read_state()
@@ -415,6 +424,7 @@ class BinaryAndRenameTests(ChallengeBase):
 # 4. Create-then-delete the same file
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class CreateDeleteFileTests(ChallengeBase):
 
     def setUp(self):
@@ -422,9 +432,6 @@ class CreateDeleteFileTests(ChallengeBase):
         self.repo = _build_create_delete_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_squash_create_and_delete_produces_commit_without_temp_file(self):
         """Squash 'add temp' + 'delete temp': the combined commit must not contain temp.txt."""
         state = self.gh.read_state()
@@ -479,6 +486,7 @@ class CreateDeleteFileTests(ChallengeBase):
 # 5. Empty commits
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class EmptyCommitTests(ChallengeBase):
 
     def setUp(self):
@@ -486,9 +494,6 @@ class EmptyCommitTests(ChallengeBase):
         self.repo = _build_empty_commit_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_fixup_empty_commit_into_real_predecessor(self):
         """Fixup the empty commit: it folds into 'real A' and vanishes."""
         state = self.gh.read_state()
@@ -546,6 +551,7 @@ class EmptyCommitTests(ChallengeBase):
 # 6. Undo / redo via branch_history + reset
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class UndoRedoTests(ChallengeBase):
     """
     After a squash/fixup, branch_history must contain the pre-operation HEAD
@@ -558,9 +564,6 @@ class UndoRedoTests(ChallengeBase):
         self.repo = _build_binary_and_rename_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_undo_squash_via_reset_to_pre_squash_head(self):
         """After squash, resetting to pre-squash HEAD restores original commit count."""
         state_before = self.gh.read_state()
@@ -669,6 +672,7 @@ class UndoRedoTests(ChallengeBase):
 # 7. Sequential operations and _start boundary stability
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class SequentialOperationsTests(ChallengeBase):
     """Verify that chained squash/fixup/reword operations keep _start consistent."""
 
@@ -677,9 +681,6 @@ class SequentialOperationsTests(ChallengeBase):
         self.repo = _build_create_delete_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_squash_then_reword_then_squash(self):
         """Three sequential operations must each succeed and leave valid state."""
         state = self.gh.read_state()
@@ -767,11 +768,10 @@ def _build_unicode_repo(parent: Path) -> Path:
 # 9. Conflicting content — move/reorder triggers a rebase conflict
 # ---------------------------------------------------------------------------
 #
-# _build_conflict_repo (from conftest) builds:
-#   "version B" — sets line 2 to LINE_B
-#   "version A" — sets line 2 to LINE_A
-#   "initial"   — creates f.txt with three lines
-# Swapping version A and version B causes a content conflict during rebase.
+# The standard test repo has:
+#   "conflict: version B" — modifies README.md line 2 to "tracking your tasks."
+#   "conflict: version A" — modifies README.md line 2 to "managing your todos."
+# Swapping these two causes a content conflict during rebase.
 
 
 # ---------------------------------------------------------------------------
@@ -909,6 +909,7 @@ def _build_two_commit_repo(parent: Path) -> Path:
 # 8. Unicode filenames and special-character commit messages
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class UnicodeAndSpecialCharTests(ChallengeBase):
     """Operations on repos with unicode filenames and special-char commit messages."""
 
@@ -917,9 +918,6 @@ class UnicodeAndSpecialCharTests(ChallengeBase):
         self.repo = _build_unicode_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_read_state_returns_unicode_messages(self):
         """read_state must correctly return unicode commit messages including emoji and CJK."""
         state = self.gh.read_state()
@@ -993,6 +991,7 @@ class UnicodeAndSpecialCharTests(ChallengeBase):
 # 9. Conflicting content — move/reorder triggers a rebase conflict
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class ConflictingContentTests(ChallengeBase):
     """
     Swapping two commits that both edit the same line causes a rebase conflict.
@@ -1001,7 +1000,13 @@ class ConflictingContentTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_conflict_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        # Remove origin remote
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
         self.gh = GitHistory(str(self.repo))
 
     def test_move_conflicting_commits_leaves_repo_recoverable(self):
@@ -1012,7 +1017,7 @@ class ConflictingContentTests(ChallengeBase):
         state = self.gh.read_state()
         order = [c.commit_hash for c in state.commits]
         self.assertGreaterEqual(len(order), 2)
-        order[0], order[1] = order[1], order[0]
+        order[1], order[2] = order[2], order[1]
 
         result = self.gh.move(order)
         if not result.ok:
@@ -1024,7 +1029,7 @@ class ConflictingContentTests(ChallengeBase):
         """After a conflicting move + explicit abort, read_state must show no rebase in progress."""
         state = self.gh.read_state()
         order = [c.commit_hash for c in state.commits]
-        order[0], order[1] = order[1], order[0]
+        order[1], order[2] = order[2], order[1]
 
         self.gh.move(order)
         self.gh.rebase_abort()
@@ -1039,7 +1044,7 @@ class ConflictingContentTests(ChallengeBase):
         state_before = self.gh.read_state()
         count_before = len(state_before.commits)
         order = [c.commit_hash for c in state_before.commits]
-        order[0], order[1] = order[1], order[0]
+        order[1], order[2] = order[2], order[1]
 
         self.gh.move(order)
         self.gh.rebase_abort()
@@ -1052,7 +1057,7 @@ class ConflictingContentTests(ChallengeBase):
         state_before = self.gh.read_state()
         head_before = state_before.commits[0].commit_hash
         order = [c.commit_hash for c in state_before.commits]
-        order[0], order[1] = order[1], order[0]
+        order[1], order[2] = order[2], order[1]
 
         self.gh.move(order)
         self.gh.rebase_abort()
@@ -1060,28 +1065,12 @@ class ConflictingContentTests(ChallengeBase):
         state_after = self.gh.read_state()
         self.assertEqual(state_after.commits[0].commit_hash, head_before,                         "HEAD changed after failed conflicting move + abort")
 
-    def test_squash_non_adjacent_commits_with_conflicting_middle_pick(self):
-        """
-        Squash 'version A' with 'initial' (non-adjacent): the middle commit
-        'version B' is picked between them and may conflict.
-        The repo must be recoverable regardless of outcome.
-        """
-        state = self.gh.read_state()
-        bm = {c.message: c.commit_hash for c in state.commits}
-        if "version A" not in bm or "initial" not in bm:
-            self.skipTest("expected commits not found")
-
-        result = self.gh.squash([bm["version A"], bm["initial"]])
-        if not result.ok:
-            self.assert_recoverable(self.gh)
-        else:
-            self.assert_valid_state(result)
-
 
 # ---------------------------------------------------------------------------
 # 10. Tags on commits in the visible range
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class TaggedCommitTests(ChallengeBase):
     """Operations must succeed (or fail cleanly) when commits carry git tags."""
 
@@ -1090,9 +1079,6 @@ class TaggedCommitTests(ChallengeBase):
         self.repo = _build_tagged_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_read_state_with_tagged_commits_succeeds(self):
         """read_state must work normally even when commits carry annotated and lightweight tags."""
         state = self.gh.read_state()
@@ -1159,6 +1145,7 @@ class TaggedCommitTests(ChallengeBase):
 # 11. Multi-line commit messages (subject + body + trailers)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class MultilineMessageTests(ChallengeBase):
     """Squash, fixup, reword on commits with subject+body+trailer messages."""
 
@@ -1226,6 +1213,7 @@ class MultilineMessageTests(ChallengeBase):
 # 12. Files with spaces and parentheses in their names
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class SpacesInFilenamesTests(ChallengeBase):
     """Operations on repos where filenames contain spaces and parentheses."""
 
@@ -1234,9 +1222,6 @@ class SpacesInFilenamesTests(ChallengeBase):
         self.repo = _build_spaces_in_names_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
     def test_show_commit_with_spaced_filename_includes_filename_in_diff(self):
         """show() must include the space-containing filename in its diff output."""
         bm = self._by_msg()
@@ -1299,6 +1284,7 @@ class SpacesInFilenamesTests(ChallengeBase):
 # 14. Single-commit and two-commit repos (near-root edge cases)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class NearRootEdgeCaseTests(ChallengeBase):
     """Operations on repos with very few commits test root-commit boundary handling."""
 

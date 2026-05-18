@@ -73,7 +73,8 @@ strong { font-weight: 600; }
     <li><strong>Select multiple</strong> — click a commit, then Shift-click another to select the range. Press Escape to deselect.</li>
     <li><strong>Squash</strong> — select two or more commits, then click the Squash button in the toolbar. The messages of all selected commits are combined.</li>
     <li><strong>Fixup</strong> — hover a commit to reveal the Fixup button (↵). Folds that commit into the one below it, discarding its message.</li>
-    <li><strong>Reword</strong> — double-click a commit message to edit it in place. Confirm with Ctrl+Enter (Cmd+Enter on Mac) or by clicking outside. Press Escape to cancel.</li>
+    <li><strong>Reword</strong> — select a commit, then click the Reword button in the toolbar to edit its message in place. Confirm with Ctrl+Enter (Cmd+Enter on Mac) or by clicking outside. Press Escape to cancel.</li>
+    <li><strong>Reset</strong> — double-click a commit to reset the branch to that commit. Requires a clean working tree.</li>
   </ul>
   <p>If a rebase produces a merge conflict, a dialog appears. Resolve the conflict in your editor, then click Continue — or click Cancel to abort and return to the original state.</p>
   <p><em>Tip: drag related commits together first, then squash or fixup.</em></p>
@@ -86,6 +87,7 @@ strong { font-weight: 600; }
     <li><strong>Group consecutive rebases</strong> — collapses adjacent rebase entries into one, reducing noise.</li>
   </ul>
   <p>The branch history reflects all local changes — commits, rebases, resets — whether made inside or outside git-history. When you pull or rebase from the remote, the update appears as a single entry.</p>
+  <p><em>Note: branch history is kept as long as git's reflog retention settings allow (configured by <code>gc.reflogExpireUnreachable</code>, typically 30 days). Once commits are no longer reachable from the branch, they may be garbage collected and their history entries will expire.</em></p>
   <p><em>Tip: a failed rebase can always be recovered with <code>git rebase --abort</code> in the terminal.</em></p>
 
   <h2>Submodules</h2>

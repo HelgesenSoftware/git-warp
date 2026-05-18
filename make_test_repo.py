@@ -4,9 +4,11 @@ Create a fresh git repo populated with commits suitable for testing git-history.
 
 Also creates a companion library repo (<name>-lib) used as a git submodule.
 
-The repo represents building a simple todo web-app. Each commit touches a
+The repo represents building a simple todo web-app. Most commits touch a
 unique file path so every rebase operation (move, squash, fixup, reword)
-succeeds without merge conflicts in automated tests.
+succeeds without merge conflicts in automated tests. Exception: the two
+"conflict:" commits both edit README.md line 2 to different values, producing
+a merge conflict when swapped (for ConflictTests).
 
 The commits are intentionally arranged to give manual testers clear targets:
 
@@ -198,6 +200,18 @@ COMMITS = [
        ".PHONY: test\ntest:\n\tpython -m pytest tests/ -v\n")],
      None),
 
+    ("conflict: version A",
+     "alice",
+     [("README.md",
+       "# Todo App\n\nA simple web application for managing your todos.\n")],
+     None),
+
+    ("conflict: version B",
+     "bob",
+     [("README.md",
+       "# Todo App\n\nA simple web application for tracking your tasks.\n")],
+     None),
+
     # ── HEAD ─────────────────────────────────────────────────────────────────
     ("Add CI workflow",
      "bob",
@@ -264,7 +278,17 @@ def init_repo(repo):
 
 def create_lib_repo(lib):
     """Create a two-commit library repo; return (hash1, hash2)."""
-    lib.mkdir(parents=True)
+    lib.mkdir(parents=True, exist_ok=True)
+    if (lib / ".git").exists():
+        # Already initialized, get the hashes of the two commits
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD~1", "HEAD"], cwd=str(lib),
+            capture_output=True, text=True, check=False
+        )
+        if r.returncode == 0:
+            lines = r.stdout.strip().split("\n")
+            if len(lines) == 2:
+                return lines[0], lines[1]
     _init(lib)
 
     def _commit(relpath, content, msg, author_key, day_offset):

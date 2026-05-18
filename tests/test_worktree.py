@@ -20,10 +20,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from git_history import GitHistory
+from git_history.backend import GitHistory
 
 
 class WorktreeTest(unittest.TestCase):
@@ -109,6 +111,7 @@ class WorktreeTest(unittest.TestCase):
         )
 
 
+@pytest.mark.release
 class WorktreeStructureTests(WorktreeTest):
     """Test that worktree file structure is recognized correctly."""
 
@@ -130,6 +133,7 @@ class WorktreeStructureTests(WorktreeTest):
         self.assertEqual(len(state.commits), 3)
 
 
+@pytest.mark.release
 class WorktreeRebaseTests(WorktreeTest):
     """Test rebase detection in worktrees (exposes the main bug)."""
 
@@ -230,6 +234,7 @@ class WorktreeRebaseTests(WorktreeTest):
         )
 
 
+@pytest.mark.release
 class WorktreeOperationTests(WorktreeTest):
     """Test that git operations work correctly in worktrees."""
 

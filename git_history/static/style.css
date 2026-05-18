@@ -1,11 +1,36 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --color-text: #222;
+  --color-bg: #f5f5f5;
+  --color-border: #ddd;
+  --color-primary: #1976d2;
+  --color-error-bg: #fdd;
+  --color-error-text: #900;
+  --color-warn-bg: #ffd;
+  --color-warn-text: #860;
+}
+body.dark {
+  --color-text: #d4d4d4;
+  --color-bg: #1e1e1e;
+  --color-border: #444;
+  --color-error-bg: #5a2b2b;
+  --color-error-text: #ff8a80;
+  --color-warn-bg: #5a5024;
+  --color-warn-text: #ffb74d;
+}
 .hidden { display: none !important; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; color: #222; background: #f5f5f5; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; color: var(--color-text); background: var(--color-bg); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
 /* Toolbar */
-#toolbar { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; background: #fff; border-bottom: 1px solid #ddd; }
-#toolbar-logo { height: 32px; width: auto; }
+#toolbar { display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; border-bottom: 1px solid #eee; gap: 12px; }
+body.dark #toolbar { border-bottom-color: var(--color-border); }
+.toolbar-logo { height: 32px; width: auto; }
+#toolbar-logo-light { display: block; }
+#toolbar-logo-dark { display: none; }
+body.dark #toolbar-logo-light { display: none; }
+body.dark #toolbar-logo-dark { display: block; }
 #toolbar-right { display: flex; gap: 8px; margin-left: auto; }
+#toolbar label { font-size: 13px; color: #666; white-space: nowrap; }
 #branch-select { height: 32px; font-size: 13px; padding: 0 8px; border: 1px solid #ccc; border-radius: 4px; min-width: 180px; }
 button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; }
 button:hover { background: #eee; }
@@ -17,8 +42,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 /* Banner */
 #banner { display: none; padding: 8px 16px; font-size: 13px; }
-#banner.error { display: block; background: #fdd; color: #900; }
-#banner.warning { display: block; background: #ffd; color: #860; }
+#banner.error { display: block; background: var(--color-error-bg); color: var(--color-error-text); }
+#banner.warning { display: block; background: var(--color-warn-bg); color: var(--color-warn-text); }
 
 /* Footer */
 #footer { padding: 6px 16px; background: #fff; border-top: 1px solid #ddd; font-size: 12px; color: #999; }
@@ -29,9 +54,11 @@ button:disabled { opacity: 0.4; cursor: default; }
 #columns { display: flex; flex: 1; overflow: hidden; }
 #commits-panel { flex: 3; overflow-y: auto; border-right: 1px solid #ddd; background: #fff; }
 #branch-history-panel { flex: 1; overflow-y: auto; background: #fafafa; }
-#commits-panel h2, #branch-history-panel h2 { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; font-size: 13px; color: #666; border-bottom: 1px solid #eee; position: sticky; top: 0; background: inherit; z-index: 1; }
+#branch-history-panel h2 { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; font-size: 13px; color: #666; border-bottom: 1px solid #eee; position: sticky; top: 0; background: inherit; z-index: 1; }
 #commits-help-btn, #branch-history-help-btn { width: 18px; height: 18px; padding: 0; border-radius: 50%; font-size: 11px; flex-shrink: 0; line-height: 1; }
-#branch-history-controls { display: flex; align-items: center; gap: 6px; padding: 6px 16px; border-bottom: 1px solid #eee; position: sticky; top: 33px; background: #fafafa; z-index: 1; }
+#branch-history-header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #eee; position: sticky; top: 0; background: inherit; z-index: 1; }
+#branch-history-buttons { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+#branch-history-title { padding: 0; border-bottom: none; background: none; font-size: 22px; font-weight: 600; color: #222; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0; line-height: 1.2; flex: 1; }
 
 /* Commit row */
 .commit-row { display: flex; align-items: center; padding: 4px 16px; border-bottom: 1px solid #f0f0f0; gap: 8px; user-select: none; position: relative; }
@@ -44,10 +71,11 @@ button:disabled { opacity: 0.4; cursor: default; }
 .commit-row .badges { display: flex; gap: 4px; flex-shrink: 0; }
 .badge-branch { background: #bbdefb; color: #1565c0; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
 .badge-tag { background: #c8e6c9; color: #2e7d32; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+.badge-index { background: #ffe0b2; color: #e65100; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
 .commit-row .message { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
 .commit-row .message.editing { cursor: text; }
-.commit-row .author { color: #888; font-size: 12px; flex-shrink: 0; width: 110px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.commit-row .date { color: #888; font-size: 12px; flex-shrink: 0; width: 80px; text-align: right; }
+.commit-row .author { color: #888; font-size: 12px; flex-shrink: 0; width: 90px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.commit-row .date { color: #888; font-size: 12px; flex-shrink: 0; width: 110px; text-align: right; }
 .commit-row .row-actions { display: none; gap: 4px; flex-shrink: 0; }
 .commit-row:hover .row-actions { display: flex; }
 .row-actions button { border: none; background: none; cursor: pointer; font-size: 14px; padding: 2px 4px; }
@@ -93,3 +121,50 @@ button:disabled { opacity: 0.4; cursor: default; }
 .help-modal-content p { margin-top: 10px; line-height: 1.5; }
 .help-list li { font-family: inherit; font-size: 13px; margin: 6px 0; line-height: 1.5; }
 .help-note { background: #f5f5f5; border-left: 3px solid #ccc; padding: 8px 12px; border-radius: 3px; }
+
+/* Dark mode */
+body.dark #toolbar-right, body.dark #branch-select { background: var(--color-bg); color: var(--color-text); border-color: var(--color-border); }
+body.dark button { background: #333; color: var(--color-text); border-color: var(--color-border); }
+body.dark button:hover { background: #404040; }
+body.dark #btn-quit { background: #d32f2f; }
+body.dark #btn-quit:hover { background: #b71c1c; }
+body.dark #btn-undo:hover, body.dark #btn-redo:hover { background: #1a237e; }
+body.dark #footer { background: #252526; border-top-color: var(--color-border); color: #888; }
+body.dark #footer a { color: #888; }
+body.dark #commits-panel { background: var(--color-bg); border-right-color: var(--color-border); }
+body.dark #branch-history-panel { background: #252526; }
+body.dark #branch-history-panel h2 { color: #aaa; border-bottom-color: var(--color-border); }
+body.dark #branch-history-header { background: #252526; border-bottom-color: var(--color-border); }
+body.dark #branch-history-title { color: var(--color-text); }
+body.dark .commit-row { border-bottom-color: #333; }
+body.dark .commit-row:hover { background: #2a2a2b; }
+body.dark .commit-row.selected { background: #1a237e; }
+body.dark .commit-row .drag-handle, body.dark .commit-row .short-hash { color: #666; }
+body.dark .commit-row .author, body.dark .commit-row .date { color: #666; }
+body.dark .badge-branch { background: #1a237e; color: #90caf9; }
+body.dark .badge-tag { background: #1b5e20; color: #81c784; }
+body.dark .badge-index { background: #4e342e; color: #ffb74d; }
+body.dark .commit-row .message { color: var(--color-text); }
+body.dark .row-actions button:hover { background: #404040; }
+body.dark .reword-input { background: var(--color-bg); color: var(--color-text); border-color: var(--color-primary); }
+body.dark .commit-row.dragging { outline-color: var(--color-primary); }
+body.dark .drop-indicator { background: var(--color-primary); }
+body.dark .branch-history-row { border-bottom-color: #333; }
+body.dark .branch-history-row:hover { background: #2a2a2b; }
+body.dark .branch-history-row .branch-history-hash { color: #666; }
+body.dark .branch-history-row .branch-history-label { color: var(--color-text); }
+body.dark .branch-history-row .branch-history-timestamp { color: #666; }
+body.dark .branch-history-row.is-head { background: #1a237e; }
+body.dark #diff-pane { background: var(--color-bg); border-top-color: var(--color-border); }
+body.dark #diff-resize { background: var(--color-border); }
+body.dark #diff-files { background: var(--color-bg); border-right-color: var(--color-border); }
+body.dark #diff-files div { color: var(--color-text); }
+body.dark #diff-content { background: var(--color-bg); color: var(--color-text); }
+body.dark .diff-add { color: #81c784; }
+body.dark .diff-del { color: #e57373; }
+body.dark #spinner { background: rgba(0,0,0,0.8); }
+body.dark .spinner-dot { border-color: var(--color-border); border-top-color: var(--color-primary); }
+body.dark .modal { background: rgba(0,0,0,0.8); }
+body.dark .modal-content { background: #252526; color: var(--color-text); box-shadow: 0 4px 24px rgba(0,0,0,0.6); }
+body.dark .modal-content h3 { color: var(--color-text); }
+body.dark .help-note { background: #2a2a2b; border-left-color: var(--color-border); }

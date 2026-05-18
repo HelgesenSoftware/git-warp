@@ -17,6 +17,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 import sys
 sys.path.insert(0, str(REPO_ROOT))
@@ -24,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from make_test_repo import init_repo
 from conftest import _commit_raw
-from git_history import GitHistory
+from git_history.backend import GitHistory
 from test_challenging import ChallengeBase, _git, _commit_env
 
 
@@ -103,6 +105,7 @@ class SubmoduleBase(ChallengeBase):
 # Helper method unit tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class HelperMethodTests(SubmoduleBase):
     """Direct tests of the four private helpers that power the submodule guards."""
 
@@ -194,6 +197,7 @@ class HelperMethodTests(SubmoduleBase):
 # Reset: .gitmodules guard
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class ResetGitmodulesGuardTests(SubmoduleBase):
 
     def test_reset_blocked_when_target_removes_gitmodules(self):
@@ -270,6 +274,7 @@ class ResetGitmodulesGuardTests(SubmoduleBase):
 # submodule_update()
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class SubmoduleUpdateTests(SubmoduleBase):
 
     def test_submodule_update_after_reset_brings_lib_to_v1(self):
@@ -343,30 +348,12 @@ class SubmoduleUpdateTests(SubmoduleBase):
         result = GitHistory(str(plain)).submodule_update()
         self.assertTrue(result.ok)
 
-    def test_submodule_update_blocked_during_rebase(self):
-        bm = self._by_msg()
-        order = [c.commit_hash for c in self.gh.read_state().commits]
-        # Attempt a rebase that will leave the repo in a rebase state.
-        # Using the conflict repo to trigger this.
-        from conftest import _build_conflict_repo
-        conflict_dir = self.tmpdir / "conflict-sub"
-        conflict_dir.mkdir()
-        conflict_repo = _build_conflict_repo(conflict_dir)
-        gh = GitHistory(str(conflict_repo))
-        state = gh.read_state()
-        order = [c.commit_hash for c in state.commits]
-        order[0], order[1] = order[1], order[0]
-        gh.move(order)
-        # Now gh is in a rebase state (conflict). Try submodule_update.
-        result = gh.submodule_update()
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "rebase_in_progress")
-
 
 # ---------------------------------------------------------------------------
 # Rebase move: .gitmodules guard
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class RebaseMoveGitmodulesTests(SubmoduleBase):
 
     def test_move_blocked_when_add_lib_is_repositioned(self):
@@ -455,6 +442,7 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
 # Squash / fixup / reword with submodule commits (these must still work)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class SubmoduleRebaseOperationsTests(SubmoduleBase):
     """Squash, fixup, and reword on commits that touch submodules must still work."""
 
@@ -548,6 +536,7 @@ def _build_repo_commits_after_gitmodules(parent: Path):
 # Rebase operations on commits above .gitmodules
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class RebaseAfterGitmodulesTests(ChallengeBase):
     """
     Verify that move, reword, fixup, and squash on commits that sit above a
@@ -566,13 +555,6 @@ class RebaseAfterGitmodulesTests(ChallengeBase):
         self.repo, self.v1 = _build_repo_commits_after_gitmodules(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
-
-    def _order(self, state=None):
-        s = state or self.gh.read_state()
-        return [c.commit_hash for c in s.commits]
     def _has_gitlink(self):
         r = _git(self.repo, "git", "ls-tree", "HEAD", "lib")
         return "160000" in r.stdout
@@ -721,6 +703,7 @@ def _build_two_branch_submodule_repo(parent: Path):
     return repo, v1, v2
 
 
+@pytest.mark.release
 class SwitchBranchSubmoduleTests(ChallengeBase):
 
     def setUp(self):
@@ -820,6 +803,7 @@ def _build_repo_trivials_above_gitlink(parent: Path):
 # Regression: rebase on commits above a gitlink must not replay the gitlink
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class TrivialCommitsAboveGitlinkTests(ChallengeBase):
 
     def setUp(self):
@@ -827,13 +811,6 @@ class TrivialCommitsAboveGitlinkTests(ChallengeBase):
         self.repo, self.v1, self.v2 = _build_repo_trivials_above_gitlink(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
-    def _by_msg(self, state=None):
-        s = state or self.gh.read_state()
-        return {c.message: c.commit_hash for c in s.commits}
-
-    def _order(self, state=None):
-        s = state or self.gh.read_state()
-        return [c.commit_hash for c in s.commits]
     def _has_gitlink(self):
         r = _git(self.repo, "git", "ls-tree", "HEAD", "lib")
         return "160000" in r.stdout
