@@ -24,8 +24,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from git_history.backend import GitHistory
+from conftest import _ensure_persistent_test_repo
+from git_history.backend import GitHistory, GitError, GitHistoryError
 
 
 class WorktreeTest(unittest.TestCase):
@@ -37,11 +39,13 @@ class WorktreeTest(unittest.TestCase):
         self.main_repo = self.tmpdir / "main"
         self.worktree_path = self.tmpdir / "worktree"
 
-        # Create main repo with a few commits
-        self._init_repo(self.main_repo)
-        self._make_commit(self.main_repo, "file1.txt", b"content1", "Initial commit")
-        self._make_commit(self.main_repo, "file1.txt", b"content2", "Second commit")
-        self._make_commit(self.main_repo, "file1.txt", b"content3", "Third commit")
+        # Clone the persistent test repo
+        persistent_repo = _ensure_persistent_test_repo()
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.main_repo)],
+                       capture_output=True, check=True)
+        # Remove origin remote (clone sets it to persistent repo, but tests expect no remote)
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.main_repo), capture_output=True)
 
         self.main_branch = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
@@ -51,9 +55,18 @@ class WorktreeTest(unittest.TestCase):
             text=True,
         ).stdout.strip()
 
-        # Create a worktree (detached HEAD at current commit)
+        # Create a new branch for the worktree (can't reuse already-checked-out branch)
+        worktree_branch = "worktree-test"
         subprocess.run(
-            ["git", "worktree", "add", str(self.worktree_path), "HEAD"],
+            ["git", "branch", worktree_branch],
+            cwd=str(self.main_repo),
+            check=True,
+            capture_output=True,
+        )
+
+        # Create a worktree on the new branch
+        subprocess.run(
+            ["git", "worktree", "add", str(self.worktree_path), worktree_branch],
             cwd=str(self.main_repo),
             check=True,
             capture_output=True,
@@ -71,28 +84,6 @@ class WorktreeTest(unittest.TestCase):
             capture_output=True,
         )
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _init_repo(self, repo_path):
-        """Initialize a git repo."""
-        repo_path.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            ["git", "init"],
-            cwd=str(repo_path),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test User"],
-            cwd=str(repo_path),
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.email", "test@example.com"],
-            cwd=str(repo_path),
-            check=True,
-            capture_output=True,
-        )
 
     def _make_commit(self, repo_path, filename, content, message):
         """Create a commit in a repo."""
@@ -130,7 +121,7 @@ class WorktreeStructureTests(WorktreeTest):
         """Test that read_state() works in a worktree."""
         state = self.gh.read_state()
         self.assertTrue(state.ok)
-        self.assertEqual(len(state.commits), 3)
+        self.assertEqual(len(state.commits), 28)
 
 
 @pytest.mark.release
@@ -164,7 +155,7 @@ class WorktreeRebaseTests(WorktreeTest):
         if rebase_result.returncode != 0 and "conflict" in rebase_result.stdout.lower() + rebase_result.stderr.lower():
             # We're in a rebase conflict state
             # Now test if _in_rebase() detects it
-            in_rebase = self.gh._in_rebase()
+            in_rebase = self.gh._git.in_rebase()
             self.assertTrue(in_rebase,
                           "_in_rebase() should return True when a rebase is in progress in a worktree")
 
@@ -247,11 +238,13 @@ class WorktreeOperationTests(WorktreeTest):
         # For now, just verify that we can attempt it without crashing
         if len(commits) >= 2:
             hashes = [c.commit_hash for c in commits]
-            # Try to reorder the last two commits
-            result = self.gh.move([0, 1])
-            # We expect this might fail due to conflicts or other issues,
-            # but it shouldn't crash with path errors
-            self.assertTrue(hasattr(result, "ok"))
+            # Try to reorder the commits
+            try:
+                result = self.gh.move(hashes)
+                self.assertTrue(result.ok)
+            except (GitError, GitHistoryError):
+                # Operation failed, but should not crash
+                pass
 
     def test_reset_in_worktree(self):
         """Test that reset works in a worktree."""

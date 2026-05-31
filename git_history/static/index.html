@@ -18,7 +18,6 @@
       <label for="branch-select">Branch:</label>
       <select id="branch-select"></select>
       <span id="toolbar-right">
-        <button id="btn-reword" class="hidden" title="Reword selected commit message">Reword</button>
         <button id="btn-squash" class="hidden" title="Squash selected commits into one">Squash</button>
         <button id="btn-stash" class="hidden" title="Stash uncommitted changes">Stash</button>
         <button id="btn-stash-pop" class="hidden" title="Restore stashed changes">Stash Pop</button>
@@ -28,15 +27,15 @@
     </div>
     <div id="commits-list"></div>
   </div>
-  <div id="branch-history-panel">
-    <div id="branch-history-header">
-      <div id="branch-history-buttons">
+  <div id="undo-stack-panel">
+    <div id="undo-stack-header">
+      <div id="undo-stack-buttons">
         <button id="btn-undo" title="Undo">↶</button>
         <button id="btn-redo" title="Redo">↷</button>
       </div>
-      <h2 id="branch-history-title"><span id="branch-history-title-text">Branch History</span><button id="branch-history-help-btn" title="Help">?</button><button id="btn-quit" title="Quit">&times;</button></h2>
+      <h2 id="undo-stack-title"><span id="undo-stack-title-text">Undo Stack</span><button id="undo-stack-help-btn" title="Help">?</button><button id="btn-quit" title="Quit">&times;</button></h2>
     </div>
-    <div id="branch-history-list"></div>
+    <div id="undo-stack-list"></div>
   </div>
 </div>
 <div id="conflict-modal" class="modal hidden">
@@ -59,8 +58,16 @@
       <li>To select multiple commits, click the first one and shift-click the second. All commits in between will be selected. Press Escape to unselect.</li>
       <li>Drag one or more commits up or down to reorder them. Press Escape to cancel.</li>
       <li>Hover a commit to reveal the Fixup button (&#x21B5;), which folds that commit into the one below it, discarding its commit message.</li>
-      <li>Double-click a commit message to edit it in place (Reword). Click outside the edit box or press Ctrl+Enter (Cmd+Enter on Mac) to confirm. Press Escape to cancel.</li>
       <li>When two or more commits are selected, click the Squash button to combine them into a single commit where the commit message is the combined messages of all the commits.</li>
+      <li>Right-click a commit to open a context menu with the following actions:
+        <ul>
+          <li><strong>Edit commit message</strong> — edit the message in place. Press Ctrl+Enter (Cmd+Enter on Mac) to confirm, or Escape to cancel.</li>
+          <li><strong>Create new branch</strong> — create a new branch pointing to that commit.</li>
+          <li><strong>Reset branch to here</strong> — hard-reset the current branch to that commit.</li>
+          <li><strong>Delete Branch</strong> — delete a local branch (available when right-clicking a branch badge).</li>
+        </ul>
+      </li>
+      <li>Select a single commit, then in the diff pane click the files you want to move out and click the Split Commit button. The commit is split into two — the unselected files, then the selected files — each keeping the original message.</li>
     </ul>
     <p>If a rebase produces a merge conflict, a dialog will appear letting you resolve the conflict in your editor and then continue, or abort and return to the original state.</p>
     <p><em>Tip: drag related commits together first, then use squash or fixup.</em></p>
@@ -69,38 +76,43 @@
     </div>
   </div>
 </div>
-<div id="branch-history-help-modal" class="modal hidden">
+<div id="undo-stack-help-modal" class="modal hidden">
   <div class="modal-content help-modal-content">
-    <h3>Branch History</h3>
-    <p>Branch History is an <strong>undo stack</strong> for your local branch. Each entry is the tip of the branch, sorted by chronologically. The Branch History begins when the local branch was created.</p>
+    <h3>Undo Stack</h3>
+    <p>The <strong>Undo Stack</strong> holds each past tip of your local branch, sorted chronologically. It begins when the local branch was created.</p>
     <p>Each of the following actions moves the current branch and updates the Commit History pane:</p>
     <ul class="help-list">
-      <li><strong>Undo</strong> go one step backwards in Branch History.</li>
-      <li><strong>Redo</strong> go one step forward in Branch History. </li>
-      <li><strong>Double-clicking</strong> reset to given entry in the Branch History.</li>
+      <li><strong>Undo</strong> go one step backwards in the Undo Stack.</li>
+      <li><strong>Redo</strong> go one step forward in the Undo Stack.</li>
+      <li><strong>Right-click</strong> an entry and choose <strong>Reset branch to here</strong> to reset the branch to that state.</li>
     </ul>
-    <p>The Branch History contains only unique modifications to the branch. If a branch is reset to an previous state, the new tip of the branch is not unique and will not be an entry in Branch History. Undo, Redo and Reset actions are non-unique modifications and are not added as new entries to the Branch History. </p>
-    <p>Branch History shows the local branch changes — commits, rebases, resets — regardless of whether they were made inside or outside git-history.</p>
-    <p>When you pull or fetch/rebase from the remote, the update to the local branch appears as a single entry in the Branch History, not as a series of individual remote commits.</p>
+    <p>The Undo Stack contains only unique modifications to the branch. If a branch is reset to an previous state, the new tip of the branch is not unique and will not be an entry in the Undo Stack. Undo, Redo and Reset actions are non-unique modifications and are not added as new entries to the Undo Stack. </p>
+    <p>The Undo Stack shows the local branch changes — commits, rebases, resets — regardless of whether they were made inside or outside git-history.</p>
+    <p>When you pull or fetch/rebase from the remote, the update to the local branch appears as a single entry in the Undo Stack, not as a series of individual remote commits.</p>
     <p><em>Tip: A failed rebase can be recovered by executing "git rebase --abort".</em></p>
     <div class="modal-actions">
-      <button id="branch-history-help-close">Close</button>
+      <button id="undo-stack-help-close">Close</button>
     </div>
   </div>
 </div>
-<div id="submodule-modal" class="modal hidden">
-  <div class="modal-content">
-    <h3>Update submodules?</h3>
-    <p>Submodule pointers have changed. Click <strong>Update</strong> to run <code>git submodule update --init</code>.</p>
-    <p>Refusing will leave the working tree dirty. git-history is disabled while the working tree is dirty.</p>
-    <div class="modal-actions">
-      <button id="btn-submodule-cancel">Refuse</button>
-      <button id="btn-submodule-ok">Update</button>
-    </div>
-  </div>
-</div>
-<div id="diff-pane" class="hidden"><div id="diff-resize"></div><div id="diff-files"></div><pre id="diff-content"></pre></div>
+<div id="diff-pane" class="hidden"><div id="diff-resize"></div><div id="diff-files"><button id="btn-split" class="hidden" title="Split the selected files into a new commit">Split Commit</button></div><pre id="diff-content"></pre></div>
 <div id="footer"><a href="/manual" target="_blank">Manual</a> &mdash; <a id="log-link" href="/log" target="_blank">Log</a> &mdash; Built by <a href="http://helgesen.software" target="_blank" rel="noopener">Helgesen Software AS</a></div>
+<div id="context-menu" class="hidden">
+  <div id="ctx-reword">Edit commit message</div>
+  <div id="ctx-create-branch">Create new branch</div>
+  <div id="ctx-reset">Reset branch to here</div>
+  <div id="ctx-delete-branch">Delete Branch</div>
+</div>
+<div id="prompt-modal" class="modal hidden">
+  <div class="modal-content">
+    <p id="prompt-modal-message"></p>
+    <input id="prompt-modal-input" type="text">
+    <div class="modal-actions">
+      <button id="prompt-modal-cancel">Cancel</button>
+      <button id="prompt-modal-ok">OK</button>
+    </div>
+  </div>
+</div>
 <script src="/static/app.js"></script>
 </body>
 </html>

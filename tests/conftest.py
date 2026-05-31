@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -12,22 +13,49 @@ from make_test_repo import AUTHORS, BASE_DATE, COMMITS, create_lib_repo, init_re
 
 
 def _ensure_persistent_test_repo() -> Path:
-    """Create the standard 21-commit test repo in the root if it doesn't exist."""
+    """Create the standard test repo in the root if it doesn't exist.
+
+    Safe for concurrent xdist workers: a directory-based lock serializes
+    creation, and each repo is built in a temp dir then atomically renamed into
+    place so no caller ever observes a half-built ``.git``.
+    """
     repo_root = REPO_ROOT
     repo = repo_root / ".test-repo"
     lib = repo_root / ".test-repo-lib"
 
-    # Check if repo is already fully initialized
     if (repo / ".git").exists():
         return repo
 
-    # Create the persistent test repo
-    lib_hash1, lib_hash2 = create_lib_repo(lib)
-    sub = {"url": str(lib), "hash1": lib_hash1, "hash2": lib_hash2}
-    repo.mkdir(exist_ok=True)
-    init_repo(repo)
-    for i, (msg, author_key, files, tag) in enumerate(COMMITS):
-        make_commit(repo, i, msg, author_key, files, tag, sub=sub)
+    lockdir = repo_root / ".test-repo.lock"
+    while True:
+        try:
+            lockdir.mkdir()  # atomic across processes
+            break
+        except FileExistsError:
+            if (repo / ".git").exists():  # another worker finished
+                return repo
+            time.sleep(0.1)
+
+    try:
+        if (repo / ".git").exists():  # re-check now that we hold the lock
+            return repo
+
+        if (lib / ".git").exists():
+            lib_hash1, lib_hash2 = create_lib_repo(lib)  # reuse existing lib
+        else:
+            lib_tmp = repo_root / f".test-repo-lib.{os.getpid()}.tmp"
+            lib_hash1, lib_hash2 = create_lib_repo(lib_tmp)
+            os.replace(lib_tmp, lib)
+
+        sub = {"url": str(lib), "hash1": lib_hash1, "hash2": lib_hash2}
+        repo_tmp = repo_root / f".test-repo.{os.getpid()}.tmp"
+        repo_tmp.mkdir()
+        init_repo(repo_tmp)
+        for i, (msg, author_key, files, tag) in enumerate(COMMITS):
+            make_commit(repo_tmp, i, msg, author_key, files, tag, sub=sub)
+        os.replace(repo_tmp, repo)
+    finally:
+        lockdir.rmdir()
 
     return repo
 

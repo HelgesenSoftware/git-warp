@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from make_test_repo import AUTHORS, BASE_DATE, init_repo
 from conftest import _commit_raw, _ensure_persistent_test_repo
-from git_history.backend import GitHistory
+from git_history.backend import GitHistory, GitHistoryError, GitError
 
 
 # ---------------------------------------------------------------------------
@@ -140,54 +140,6 @@ def _build_binary_and_rename_repo(parent: Path) -> Path:
     return repo
 
 
-def _build_create_delete_repo(parent: Path) -> Path:
-    """
-    Repo where one commit creates a file and a later commit deletes it.
-
-    Commits (newest first):
-      "after delete"  — creates unrelated.txt
-      "delete temp"   — deletes temp.txt
-      "add temp"      — creates temp.txt
-      "initial"       — creates base.txt
-    """
-    repo = parent / "create-delete-repo"
-    repo.mkdir()
-    init_repo(repo)
-
-    _commit_raw(repo, "base.txt", b"base\n",      "initial",      "alice", 0)
-    _commit_raw(repo, "temp.txt", b"temporary\n", "add temp",     "bob",   1)
-
-    env2 = _commit_env("carol", 2)
-    (repo / "temp.txt").unlink()
-    subprocess.run(["git", "rm", "temp.txt"], cwd=str(repo),
-                   capture_output=True, check=True)
-    subprocess.run(["git", "commit", "-m", "delete temp"],
-                   cwd=str(repo), env=env2, capture_output=True, check=True)
-
-    _commit_raw(repo, "unrelated.txt", b"unrelated\n", "after delete", "alice", 3)
-    return repo
-
-
-def _build_empty_commit_repo(parent: Path) -> Path:
-    """
-    Repo with an --allow-empty commit mixed in.
-
-    Commits (newest first):
-      "real C"   — modifies a.txt
-      "empty B"  — no file changes
-      "real A"   — creates a.txt
-      "initial"  — creates base.txt
-    """
-    repo = parent / "empty-commit-repo"
-    repo.mkdir()
-    init_repo(repo)
-
-    _commit_raw(repo, "base.txt", b"base\n", "initial", "alice", 0)
-    _commit_raw(repo, "a.txt",    b"v1\n",   "real A",  "bob",   1)
-    _commit_empty(repo, "empty B", "carol", 2)
-    _commit_raw(repo, "a.txt",    b"v2\n",   "real C",  "alice", 3)
-    return repo
-
 
 # ---------------------------------------------------------------------------
 # Base test class
@@ -245,7 +197,13 @@ class MergeCommitTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_merge_commit_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        # Remove origin remote
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
         self.gh = GitHistory(str(self.repo))
 
     def _merge_and_non_merge_hashes(self):
@@ -263,11 +221,11 @@ class MergeCommitTests(ChallengeBase):
         merge_hashes, _ = self._merge_and_non_merge_hashes()
         self.assertTrue(merge_hashes, "expected at least one merge commit in visible range")
 
-        result = self.gh.squash([merge_hashes[0]])
-        if not result.ok:
-            self.assert_recoverable(self.gh)
-        else:
+        try:
+            result = self.gh.squash([merge_hashes[0]])
             self.assert_valid_state(result)
+        except GitError:
+            self.assert_recoverable(self.gh)
 
     def test_squash_two_non_merge_commits_when_merge_is_in_range(self):
         """
@@ -279,12 +237,12 @@ class MergeCommitTests(ChallengeBase):
         if len(non_merge) < 2:
             self.skipTest("need at least two non-merge commits")
 
-        result = self.gh.squash([non_merge[0], non_merge[1]])
-        if not result.ok:
-            self.assert_recoverable(self.gh)
-        else:
+        try:
+            result = self.gh.squash([non_merge[0], non_merge[1]])
             state = self.gh.read_state()
             self.assert_valid_state(state)
+        except (GitError, GitHistoryError):
+            self.assert_recoverable(self.gh)
 
     def test_fixup_of_non_merge_commit_adjacent_to_merge_leaves_repo_recoverable(self):
         """Fixup a regular commit that is adjacent to a merge commit."""
@@ -292,11 +250,11 @@ class MergeCommitTests(ChallengeBase):
         if not non_merge:
             self.skipTest("no non-merge commits")
 
-        result = self.gh.fixup([non_merge[0]])
-        if not result.ok:
-            self.assert_recoverable(self.gh)
-        else:
+        try:
+            result = self.gh.fixup([non_merge[0]])
             self.assert_valid_state(result)
+        except GitError:
+            self.assert_recoverable(self.gh)
 
     def test_move_with_merge_commit_present_leaves_repo_recoverable(self):
         """Swap the two newest commits when a merge commit is in the visible list."""
@@ -306,11 +264,11 @@ class MergeCommitTests(ChallengeBase):
             self.skipTest("not enough commits")
         order[0], order[1] = order[1], order[0]
 
-        result = self.gh.move(order)
-        if not result.ok:
-            self.assert_recoverable(self.gh)
-        else:
+        try:
+            result = self.gh.move(order)
             self.assert_valid_state(result)
+        except GitError:
+            self.assert_recoverable(self.gh)
 
     def test_reword_non_merge_commit_when_merge_is_in_range(self):
         """Reword a regular commit; the merge commit in the todo must not break things."""
@@ -332,7 +290,10 @@ class MergeCommitTests(ChallengeBase):
         if len(non_merge) < 2:
             self.skipTest("need at least two non-merge commits")
 
-        self.gh.squash([non_merge[0], non_merge[1]])        # Whether op succeeded or failed, read_state must work.
+        try:
+            self.gh.squash([non_merge[0], non_merge[1]])        # Whether op succeeded or failed, read_state must work.
+        except (GitError, GitHistoryError):
+            pass
         if self.gh.read_state().rebase_in_progress:
             self.gh.rebase_abort()
         state = self.gh.read_state()
@@ -424,12 +385,29 @@ class BinaryAndRenameTests(ChallengeBase):
 # 4. Create-then-delete the same file
 # ---------------------------------------------------------------------------
 
+def _setup_create_delete_repo(tmpdir):
+    """Clone the standard test repo and append create-then-delete commits on top."""
+    persistent_repo = _ensure_persistent_test_repo()
+    repo = tmpdir / "repo"
+    subprocess.run(["git", "clone", str(persistent_repo), str(repo)],
+                   capture_output=True, check=True)
+    subprocess.run(["git", "remote", "remove", "origin"],
+                   cwd=str(repo), capture_output=True)
+    _commit_raw(repo, "temp.txt", b"temporary\n", "add temp", "bob", 200)
+    (repo / "temp.txt").unlink()
+    subprocess.run(["git", "rm", "temp.txt"], cwd=str(repo),
+                   capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "delete temp"], cwd=str(repo),
+                   capture_output=True, check=True)
+    return repo
+
+
 @pytest.mark.release
 class CreateDeleteFileTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_create_delete_repo(self.tmpdir)
+        self.repo = _setup_create_delete_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
     def test_squash_create_and_delete_produces_commit_without_temp_file(self):
@@ -441,9 +419,7 @@ class CreateDeleteFileTests(ChallengeBase):
         self.assertTrue(result.ok, f"squash of create+delete failed: {result}")
         self.assertEqual(len(result.commits), len(state.commits) - 1)
 
-        # The combined commit is the one that replaced both — it's at the position
-        # of 'add temp' in the new history (between 'after delete' and 'initial').
-        combined = result.commits[1]  # after delete=0, combined=1, initial=2
+        combined = result.commits[0]  # squashed commit is the new HEAD
         files_in_combined = _ls_tree(self.repo, combined.commit_hash)
         self.assertNotIn("temp.txt", files_in_combined,
                          "temp.txt must not exist in the squashed commit's tree")
@@ -468,18 +444,20 @@ class CreateDeleteFileTests(ChallengeBase):
 
     def test_squash_nonadjacent_create_delete_with_middle_commit(self):
         """
-        Squash 'add temp' with 'after delete' (non-adjacent, with 'delete temp'
-        between them). The todo inserts 'delete temp' as a plain pick between them.
-        Verify the repo is recoverable regardless of outcome.
+        Squash 'add temp' (HEAD~1) with a commit two steps above it (HEAD~2),
+        so 'delete temp' (HEAD) sits between them as a plain pick. Verify the
+        repo is recoverable regardless of outcome.
         """
         state = self.gh.read_state()
-        bm = self._by_msg(state)
+        # commits[0]=delete temp, commits[1]=add temp, commits[2]=two above add temp
+        h_add  = state.commits[1].commit_hash
+        h_above = state.commits[2].commit_hash
 
-        result = self.gh.squash([bm["add temp"], bm["after delete"]])
-        if not result.ok:
-            self.assert_recoverable(self.gh)
-        else:
+        try:
+            result = self.gh.squash([h_add, h_above])
             self.assert_valid_state(result)
+        except (GitError, GitHistoryError):
+            self.assert_recoverable(self.gh)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +469,13 @@ class EmptyCommitTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_empty_commit_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       check=True, capture_output=True)
+        _commit_raw(self.repo, "a.txt", b"v1\n", "real A",  "bob",   1)
+        _commit_empty(self.repo, "empty B", "carol", 2)
+        _commit_raw(self.repo, "a.txt", b"v2\n", "real C",  "alice", 3)
         self.gh = GitHistory(str(self.repo))
 
     def test_fixup_empty_commit_into_real_predecessor(self):
@@ -548,20 +532,25 @@ class EmptyCommitTests(ChallengeBase):
 
 
 # ---------------------------------------------------------------------------
-# 6. Undo / redo via branch_history + reset
+# 6. Undo / redo via undo_stack + reset
 # ---------------------------------------------------------------------------
 
 @pytest.mark.release
 class UndoRedoTests(ChallengeBase):
     """
-    After a squash/fixup, branch_history must contain the pre-operation HEAD
-    so the user can reset back to it (undo). After undo, branch_history must
+    After a squash/fixup, undo_stack must contain the pre-operation HEAD
+    so the user can reset back to it (undo). After undo, undo_stack must
     still contain the post-operation HEAD so the user can redo.
     """
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_binary_and_rename_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
         self.gh = GitHistory(str(self.repo))
 
     def test_undo_squash_via_reset_to_pre_squash_head(self):
@@ -571,13 +560,13 @@ class UndoRedoTests(ChallengeBase):
         pre_squash_head = state_before.commits[0].commit_hash
         bm = self._by_msg(state_before)
 
-        squash_result = self.gh.squash([bm["add binary"], bm["update binary"]])
+        squash_result = self.gh.squash([bm["Add error pages"], bm["Add deployment config"]])
         self.assertTrue(squash_result.ok, f"squash failed: {squash_result}")
 
-        # Pre-squash HEAD must be in branch_history.
-        bh_hashes = {e.commit_hash for e in squash_result.branch_history}
+        # Pre-squash HEAD must be in undo_stack.
+        bh_hashes = {e.commit_hash for e in squash_result.undo_stack}
         self.assertIn(pre_squash_head, bh_hashes,
-                      "pre-squash HEAD not in branch_history — undo impossible")
+                      "pre-squash HEAD not in undo_stack — undo impossible")
 
         undo = self.gh.reset(pre_squash_head)
         self.assertTrue(undo.ok, f"undo (reset) failed: {undo}")
@@ -589,16 +578,16 @@ class UndoRedoTests(ChallengeBase):
         bm = self._by_msg(state_before)
         pre_squash_head = state_before.commits[0].commit_hash
 
-        squash_result = self.gh.squash([bm["add binary"], bm["update binary"]])
+        squash_result = self.gh.squash([bm["Add error pages"], bm["Add deployment config"]])
         self.assertTrue(squash_result.ok)
         post_squash_head = squash_result.commits[0].commit_hash
         count_after_squash = len(squash_result.commits)
         self.gh.reset(pre_squash_head)  # undo
 
         undo_state = self.gh.read_state()
-        bh_hashes = {e.commit_hash for e in undo_state.branch_history}
+        bh_hashes = {e.commit_hash for e in undo_state.undo_stack}
         self.assertIn(post_squash_head, bh_hashes,
-                      "post-squash HEAD not in branch_history after undo — redo impossible")
+                      "post-squash HEAD not in undo_stack after undo — redo impossible")
 
         redo = self.gh.reset(post_squash_head)
         self.assertTrue(redo.ok, f"redo (reset) failed: {redo}")
@@ -611,13 +600,13 @@ class UndoRedoTests(ChallengeBase):
         pre_fixup_head = state_before.commits[0].commit_hash
         count_before = len(state_before.commits)
 
-        fixup_result = self.gh.fixup([bm["update binary"]])
+        fixup_result = self.gh.fixup([bm["Add deployment config"]])
         self.assertTrue(fixup_result.ok)
         undo = self.gh.reset(pre_fixup_head)
         self.assertTrue(undo.ok)
         self.assertEqual(len(undo.commits), count_before)
         msgs = [c.message for c in undo.commits]
-        self.assertIn("update binary", msgs,
+        self.assertIn("Add deployment config", msgs,
                       "fixup'd commit message not restored after undo")
 
     def test_multiple_sequential_squash_then_undo_each(self):
@@ -627,17 +616,17 @@ class UndoRedoTests(ChallengeBase):
         head0 = state0.commits[0].commit_hash
         count0 = len(state0.commits)
 
-        # Squash 1: combine binary commits.
-        r1 = self.gh.squash([bm0["add binary"], bm0["update binary"]])
+        # Squash 1: combine two adjacent commits.
+        r1 = self.gh.squash([bm0["Add error pages"], bm0["Add deployment config"]])
         self.assertTrue(r1.ok)
         head1 = r1.commits[0].commit_hash
         count1 = len(r1.commits)
         self.assertEqual(count1, count0 - 1)
 
-        # Squash 2: combine rename + update docs (non-binary, different files).
+        # Squash 2: combine a different pair of adjacent commits.
         bm1 = self._by_msg(r1)
-        if "rename to docs" in bm1 and "update docs" in bm1:
-            r2 = self.gh.squash([bm1["rename to docs"], bm1["update docs"]])
+        if "conflict: version B" in bm1 and "conflict: version A" in bm1:
+            r2 = self.gh.squash([bm1["conflict: version B"], bm1["conflict: version A"]])
             self.assertTrue(r2.ok)
             count2 = len(r2.commits)
             self.assertEqual(count2, count1 - 1)
@@ -656,16 +645,16 @@ class UndoRedoTests(ChallengeBase):
         """After reword, undo via reset restores the original commit message."""
         state_before = self.gh.read_state()
         bm = self._by_msg(state_before)
-        h = bm["update docs"]
+        h = bm["Add deployment config"]
         pre_reword_head = state_before.commits[0].commit_hash
 
-        rw = self.gh.reword(h, "polished docs update")
+        rw = self.gh.reword(h, "polished deployment config")
         self.assertTrue(rw.ok)
         undo = self.gh.reset(pre_reword_head)
         self.assertTrue(undo.ok)
         msgs = [c.message for c in undo.commits]
-        self.assertIn("update docs", msgs)
-        self.assertNotIn("polished docs update", msgs)
+        self.assertIn("Add deployment config", msgs)
+        self.assertNotIn("polished deployment config", msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +667,7 @@ class SequentialOperationsTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_create_delete_repo(self.tmpdir)
+        self.repo = _setup_create_delete_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
     def test_squash_then_reword_then_squash(self):
@@ -690,8 +679,10 @@ class SequentialOperationsTests(ChallengeBase):
         self.assertTrue(r1.ok, f"first squash failed: {r1}")
         self.assert_valid_state(r1)
 
-        oldest = r1.commits[-1]
-        r2 = self.gh.reword(oldest.commit_hash, "reworded base")
+        # Reword the top commit (above the merge commit) rather than the oldest,
+        # to avoid replaying the merge commit during rebase.
+        top = r1.commits[0]
+        r2 = self.gh.reword(top.commit_hash, "reworded top")
         self.assertTrue(r2.ok, f"reword after squash failed: {r2}")
         self.assert_valid_state(r2)
 
@@ -714,7 +705,8 @@ class SequentialOperationsTests(ChallengeBase):
         count -= 1
 
         bm2 = self._by_msg(r1)
-        r2 = self.gh.fixup([bm2["after delete"]])
+        # After folding "delete temp", the next top commit is "Add error pages" from the standard repo.
+        r2 = self.gh.fixup([bm2["Add error pages"]])
         self.assertTrue(r2.ok)
         self.assertEqual(len(r2.commits), count - 1)
     def test_interleaved_squash_and_reword_preserve_all_other_messages(self):
@@ -725,42 +717,41 @@ class SequentialOperationsTests(ChallengeBase):
         r1 = self.gh.squash([bm["add temp"], bm["delete temp"]])
         self.assertTrue(r1.ok)
         msgs1 = {c.message for c in r1.commits}
-        self.assertIn("initial",     msgs1)
-        self.assertIn("after delete", msgs1)
+        self.assertIn("Initial commit", msgs1)
+        self.assertIn("Add error pages", msgs1)
 
         bm2 = self._by_msg(r1)
-        h_after = bm2.get("after delete")
+        h_after = bm2.get("Add error pages")
         if h_after:
             r2 = self.gh.reword(h_after, "post-squash top")
             self.assertTrue(r2.ok)
             msgs2 = {c.message for c in r2.commits}
-            self.assertIn("initial", msgs2,
-                          "'initial' commit message changed by unrelated reword")
+            self.assertIn("Initial commit", msgs2,
+                          "'Initial commit' message changed by unrelated reword")
 
 
 # ---------------------------------------------------------------------------
 # 8. Unicode filenames and special-character commit messages
 # ---------------------------------------------------------------------------
 
-def _build_unicode_repo(parent: Path) -> Path:
+def _setup_unicode_repo(tmpdir: Path) -> Path:
     """
-    Repo with unicode filenames, unicode content, and commit messages that
-    contain emoji, non-ASCII letters, and shell-special characters.
+    Clone the standard test repo and append three unicode-filename commits on top.
 
-    Commits (newest first):
+    Commits appended (newest first):
       'update: 日本語 ($special & "quotes")' — modifies 日本語.txt
       "feat: add café ☕"                     — creates café.txt
       "add résumé.txt"                        — creates résumé.txt
-      "initial"                               — creates base.txt
     """
-    repo = parent / "unicode-repo"
-    repo.mkdir()
-    init_repo(repo)
-
-    _commit_raw(repo, "base.txt",   b"base\n",                         "initial",                            "alice", 0)
-    _commit_raw(repo, "résumé.txt", "résumé: naïve\n".encode("utf-8"), "add résumé.txt",                     "bob",   1)
-    _commit_raw(repo, "café.txt",   "☕ coffee\n".encode("utf-8"),      "feat: add café ☕",                   "carol", 2)
-    _commit_raw(repo, "日本語.txt", "日本語\n".encode("utf-8"),         'update: 日本語 ($special & "quotes")', "alice", 3)
+    persistent_repo = _ensure_persistent_test_repo()
+    repo = tmpdir / "repo"
+    subprocess.run(["git", "clone", str(persistent_repo), str(repo)],
+                   capture_output=True, check=True)
+    subprocess.run(["git", "remote", "remove", "origin"],
+                   cwd=str(repo), capture_output=True)
+    _commit_raw(repo, "résumé.txt", "résumé: naïve\n".encode("utf-8"), "add résumé.txt",                     "bob",   200)
+    _commit_raw(repo, "café.txt",   "☕ coffee\n".encode("utf-8"),      "feat: add café ☕",                   "carol", 201)
+    _commit_raw(repo, "日本語.txt", "日本語\n".encode("utf-8"),         'update: 日本語 ($special & "quotes")', "alice", 202)
     return repo
 
 
@@ -778,131 +769,25 @@ def _build_unicode_repo(parent: Path) -> Path:
 # 10. Tags on commits in the visible range
 # ---------------------------------------------------------------------------
 
-def _build_tagged_repo(parent: Path) -> Path:
-    """
-    Repo where commits carry lightweight and annotated tags.
-
-    Commits (newest first):
-      "release notes"  — modifies changelog.txt; lightweight tag 'v1.1'
-      "bump version"   — modifies version.txt;   annotated tag 'v1.0'
-      "add version"    — creates version.txt
-      "initial"        — creates base.txt
-    """
-    repo = parent / "tagged-repo"
-    repo.mkdir()
-    init_repo(repo)
-
-    _commit_raw(repo, "base.txt",    b"base\n",      "initial",       "alice", 0)
-    _commit_raw(repo, "version.txt", b"0.0.1\n",     "add version",   "bob",   1)
-    _commit_raw(repo, "version.txt", b"1.0.0\n",     "bump version",  "carol", 2)
-    h_v10 = _git(repo, "git", "rev-parse", "HEAD").stdout.strip()
-    subprocess.run(
-        ["git", "tag", "-a", "v1.0", h_v10, "-m", "Release 1.0"],
-        cwd=str(repo), capture_output=True, check=True
-    )
-
-    _commit_raw(repo, "changelog.txt", b"- released\n", "release notes", "alice", 3)
-    h_v11 = _git(repo, "git", "rev-parse", "HEAD").stdout.strip()
-    subprocess.run(
-        ["git", "tag", "v1.1", h_v11],
-        cwd=str(repo), capture_output=True, check=True
-    )
-    return repo
-
 
 # ---------------------------------------------------------------------------
 # 11. Multi-line commit messages (subject + body + trailers)
 # ---------------------------------------------------------------------------
 
-def _build_multiline_message_repo(parent: Path) -> Path:
-    """
-    Repo with commits that have proper subject + body messages and trailers.
-
-    Commits (newest first):
-      "Fix critical bug\\n\\nCaused by X.\\nSee issue #42." — modifies fix.txt
-      "Add feature\\n\\nNew API.\\nCo-authored-by: Bob <b@x.com>" — adds feat.txt
-      "initial" — creates base.txt
-    """
-    repo = parent / "multiline-repo"
-    repo.mkdir()
-    init_repo(repo)
-
-    _commit_raw(repo, "base.txt", b"base\n", "initial", "alice", 0)
-
-    env1 = _commit_env("bob", 1)
-    (repo / "feat.txt").write_bytes(b"feature\n")
-    subprocess.run(["git", "add", "feat.txt"], cwd=str(repo), capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add feature\n\nNew API.\nCo-authored-by: Bob <b@x.com>"],
-        cwd=str(repo), env=env1, capture_output=True, check=True
-    )
-
-    env2 = _commit_env("carol", 2)
-    (repo / "fix.txt").write_bytes(b"fix\n")
-    subprocess.run(["git", "add", "fix.txt"], cwd=str(repo), capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Fix critical bug\n\nCaused by X.\nSee issue #42."],
-        cwd=str(repo), env=env2, capture_output=True, check=True
-    )
-    return repo
-
-
-# ---------------------------------------------------------------------------
-# 12. Files with spaces and parentheses in their names
-# ---------------------------------------------------------------------------
-
-def _build_spaces_in_names_repo(parent: Path) -> Path:
-    """
-    Repo with filenames containing spaces and parentheses.
-
-    Commits (newest first):
-      "update docs"       — modifies "my document.txt"
-      "add spaced files"  — creates "my document.txt" and "notes (draft).txt"
-      "initial"           — creates base.txt
-    """
-    repo = parent / "spaces-repo"
-    repo.mkdir()
-    init_repo(repo)
-
-    _commit_raw(repo, "base.txt", b"base\n", "initial", "alice", 0)
-
-    env1 = _commit_env("bob", 1)
-    (repo / "my document.txt").write_bytes(b"draft\n")
-    (repo / "notes (draft).txt").write_bytes(b"notes\n")
-    subprocess.run(
-        ["git", "add", "--", "my document.txt", "notes (draft).txt"],
-        cwd=str(repo), capture_output=True, check=True
-    )
-    subprocess.run(
-        ["git", "commit", "-m", "add spaced files"],
-        cwd=str(repo), env=env1, capture_output=True, check=True
-    )
-
-    _commit_raw(repo, "my document.txt", b"final\n", "update docs", "carol", 2)
-    return repo
+MULTILINE_COMMIT_MESSAGE = (
+    "Fix: handle edge\tcase\n\n"
+    "This commit:\n"
+    "\t- has \"double\" and 'single' quotes\n"
+    "\t- backslash C:\\path\\to\\file\n"
+    "\t- unicode: café, naïve, 日本語 🎉\n\n"
+    "Fixes #42"
+)
 
 
 # ---------------------------------------------------------------------------
 # 14. Single-commit and two-commit repos (near-root edge cases)
 # ---------------------------------------------------------------------------
 
-def _build_single_commit_repo(parent: Path) -> Path:
-    """Repo with exactly one commit (the root)."""
-    repo = parent / "single-repo"
-    repo.mkdir()
-    init_repo(repo)
-    _commit_raw(repo, "base.txt", b"base\n", "initial", "alice", 0)
-    return repo
-
-
-def _build_two_commit_repo(parent: Path) -> Path:
-    """Repo with exactly two commits (root + one child)."""
-    repo = parent / "two-repo"
-    repo.mkdir()
-    init_repo(repo)
-    _commit_raw(repo, "base.txt", b"base\n", "initial", "alice", 0)
-    _commit_raw(repo, "a.txt",    b"v1\n",   "add a",   "bob",   1)
-    return repo
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +800,7 @@ class UnicodeAndSpecialCharTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_unicode_repo(self.tmpdir)
+        self.repo = _setup_unicode_repo(self.tmpdir)
         self.gh = GitHistory(str(self.repo))
 
     def test_read_state_returns_unicode_messages(self):
@@ -961,8 +846,7 @@ class UnicodeAndSpecialCharTests(ChallengeBase):
     def test_show_commit_with_unicode_filename(self):
         """show() must succeed on a commit that creates a unicode-named file."""
         state = self.gh.read_state()
-        # 'add résumé.txt' is the second-oldest commit.
-        h = state.commits[-2].commit_hash
+        h = self._by_msg(state)["add résumé.txt"]
         result = self.gh.show(h)
         self.assertTrue(result.ok, f"show() failed on unicode-filename commit: {result}")
 
@@ -1066,33 +950,111 @@ class ConflictingContentTests(ChallengeBase):
         self.assertEqual(state_after.commits[0].commit_hash, head_before,                         "HEAD changed after failed conflicting move + abort")
 
 
+class MultiConflictContinueTests(ChallengeBase):
+    """Regression: a rebase that conflicts again after the first conflict is
+    resolved must surface the second conflict, not a generic git failure.
+
+    Three commits rewrite the same single line of conflict_x.txt:
+        "x base" (0) -> "x to one" (1) -> "x to two" (2)
+    Swapping the two newest replays them in reverse onto "x base", so each pick
+    conflicts on that line: pick "x to two" (conflict 1), then "x to one"
+    (conflict 2). git rebase --continue exits non-zero on the second conflict;
+    the backend must report it as a conflict rather than letting the GitError
+    propagate as git_failed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
+        _commit_raw(self.repo, "conflict_x.txt", b"0\n", "x base",   "alice", 1)
+        _commit_raw(self.repo, "conflict_x.txt", b"1\n", "x to one", "bob",   2)
+        _commit_raw(self.repo, "conflict_x.txt", b"2\n", "x to two", "carol", 3)
+        self.gh = GitHistory(str(self.repo))
+
+    def _resolve(self, content: bytes):
+        (self.repo / "conflict_x.txt").write_bytes(content)
+        subprocess.run(["git", "add", "conflict_x.txt"], cwd=str(self.repo),
+                       check=True, capture_output=True)
+
+    def _swap_two_newest(self):
+        order = self._order()
+        order[0], order[1] = order[1], order[0]
+        return self.gh.move(order)
+
+    @pytest.mark.release
+    def test_second_conflict_after_resolving_first_is_reported_as_conflict(self):
+        first = self._swap_two_newest()
+        self.assertFalse(first.ok)
+        self.assertTrue(first.conflict)
+        self.assertIn("conflict_x.txt", first.conflict_files)
+
+        self._resolve(b"2\n")
+        second = self.gh.rebase_continue()
+        self.assertFalse(second.ok)
+        self.assertTrue(second.conflict)
+        self.assertIn("conflict_x.txt", second.conflict_files)
+        self.assertTrue(second.rebase_in_progress)
+
+    @pytest.mark.release
+    def test_continue_through_all_conflicts_completes(self):
+        self._swap_two_newest()
+        self._resolve(b"2\n")
+        self.gh.rebase_continue()      # stops on the second conflict
+        self._resolve(b"1\n")
+        final = self.gh.rebase_continue()
+        self.assertTrue(final.ok)
+        self.assertFalse(final.rebase_in_progress)
+        self.assertFalse(final.conflict)
+
+
 # ---------------------------------------------------------------------------
 # 10. Tags on commits in the visible range
 # ---------------------------------------------------------------------------
 
 @pytest.mark.release
 class TaggedCommitTests(ChallengeBase):
-    """Operations must succeed (or fail cleanly) when commits carry git tags."""
+    """Operations must succeed (or fail cleanly) when commits carry git tags.
+
+    Standard repo has:
+      "Add admin panel"      — annotated tag 'v-test-ann'
+      "Add deployment config"— lightweight tag 'v-test-lw'  (adjacent, newer)
+      "Add user dashboard"   — no tag (used as reset target)
+
+    These commits sit above the merge commit so rebasing them does not require
+    replaying the merge, and "Add admin panel"'s predecessor is a plain commit.
+    """
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_tagged_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
         self.gh = GitHistory(str(self.repo))
 
     def test_read_state_with_tagged_commits_succeeds(self):
         """read_state must work normally even when commits carry annotated and lightweight tags."""
         state = self.gh.read_state()
         self.assert_valid_state(state)
-        self.assertGreaterEqual(len(state.commits), 3)
+        bm = self._by_msg(state)
+        self.assertIn("Add admin panel", bm)
+        self.assertIn("Add deployment config", bm)
 
     def test_squash_two_tagged_commits(self):
-        """Squash the annotated-tagged and lightweight-tagged commits."""
+        """Squash the annotated-tagged and lightweight-tagged commits (adjacent)."""
         state = self.gh.read_state()
         bm = self._by_msg(state)
-        self.assertIn("bump version",  bm)
-        self.assertIn("release notes", bm)
+        self.assertIn("Add admin panel",       bm)
+        self.assertIn("Add deployment config", bm)
 
-        result = self.gh.squash([bm["bump version"], bm["release notes"]])
+        result = self.gh.squash([bm["Add admin panel"], bm["Add deployment config"]])
         if not result.ok:
             self.assert_recoverable(self.gh)
         else:
@@ -1103,21 +1065,21 @@ class TaggedCommitTests(ChallengeBase):
         """Reword the commit carrying the annotated tag: the message must change."""
         state = self.gh.read_state()
         bm = self._by_msg(state)
-        h = bm["bump version"]
+        h = bm["Add admin panel"]
 
-        result = self.gh.reword(h, "bump to v1.0.0")
+        result = self.gh.reword(h, "Add admin dashboard panel")
         if not result.ok:
             self.assert_recoverable(self.gh)
         else:
             msgs = [c.message for c in result.commits]
-            self.assertIn("bump to v1.0.0", msgs)
-            self.assertNotIn("bump version", msgs)
+            self.assertIn("Add admin dashboard panel", msgs)
+            self.assertNotIn("Add admin panel", msgs)
 
     def test_fixup_annotated_tagged_commit_into_predecessor(self):
-        """Fixup the annotated-tagged commit into 'add version'."""
+        """Fixup the annotated-tagged commit into its predecessor 'Add user dashboard'."""
         state = self.gh.read_state()
         bm = self._by_msg(state)
-        h = bm["bump version"]
+        h = bm["Add admin panel"]
 
         result = self.gh.fixup([h])
         if not result.ok:
@@ -1125,19 +1087,20 @@ class TaggedCommitTests(ChallengeBase):
         else:
             self.assert_valid_state(result)
             msgs = [c.message for c in result.commits]
-            self.assertNotIn("bump version", msgs)
+            self.assertNotIn("Add admin panel", msgs)
 
     def test_reset_to_pre_tag_commit(self):
-        """Reset to 'add version', before any tags exist on later commits."""
+        """Reset to 'Add user dashboard', before the test-tagged commits."""
         state = self.gh.read_state()
         bm = self._by_msg(state)
-        result = self.gh.reset(bm["add version"])
+        result = self.gh.reset(bm["Add user dashboard"])
         self.assertTrue(result.ok, f"reset past tagged commits failed: {result}")
-        self.assertEqual(result.commits[0].commit_hash, bm["add version"])
+        self.assertEqual(result.commits[0].commit_hash, bm["Add user dashboard"])
+
     def test_show_tagged_commit_succeeds(self):
         """show() on an annotated-tagged commit must return ok=True."""
         bm = self._by_msg()
-        result = self.gh.show(bm["bump version"])
+        result = self.gh.show(bm["Add admin panel"])
         self.assertTrue(result.ok, f"show() failed on tagged commit: {result}")
 
 
@@ -1151,60 +1114,72 @@ class MultilineMessageTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_multiline_message_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
         self.gh = GitHistory(str(self.repo))
+
+    def _multiline_commit(self, state):
+        c = next((c for c in state.commits if c.message == MULTILINE_COMMIT_MESSAGE), None)
+        self.assertIsNotNone(c, "multiline commit not found in state")
+        return c
 
     def test_read_state_returns_full_multiline_message(self):
         """read_state must return full multi-line messages, not just the subject line."""
         state = self.gh.read_state()
         self.assert_valid_state(state)
-        full = " ".join(c.message for c in state.commits)
-        self.assertIn("Co-authored-by", full,
-                      "trailer line missing from read_state commit message")
-        self.assertIn("issue #42", full,
+        c = self._multiline_commit(state)
+        self.assertIn("Fixes #42", c.message,
                       "body line missing from read_state commit message")
 
     def test_squash_multiline_message_commits(self):
-        """Squash two multiline-message commits: commit count decreases by one."""
+        """Squash multiline commit with its neighbour: commit count decreases by one."""
         state = self.gh.read_state()
-        hashes = [c.commit_hash for c in state.commits[:2]]
+        i = next(idx for idx, c in enumerate(state.commits) if c.message == MULTILINE_COMMIT_MESSAGE)
+        # squash with the commit above it (newer, lower index)
+        hashes = [state.commits[i - 1].commit_hash, state.commits[i].commit_hash]
         result = self.gh.squash(hashes)
         self.assertTrue(result.ok, f"squash of multiline-message commits failed: {result}")
         self.assertEqual(len(result.commits), len(state.commits) - 1)
+
     def test_reword_multiline_commit_to_single_line(self):
         """Reword a multiline-message commit to a plain one-liner."""
         state = self.gh.read_state()
-        h = state.commits[0].commit_hash
+        h = self._multiline_commit(state).commit_hash
         result = self.gh.reword(h, "simple one-liner")
         self.assertTrue(result.ok, f"reword multiline → simple failed: {result}")
         msgs = [c.message for c in result.commits]
         self.assertIn("simple one-liner", msgs)
 
     def test_reword_single_line_commit_to_multiline(self):
-        """Reword the simple 'initial' commit to a multi-line message with a body."""
+        """Reword a simple commit to a multi-line message with a body."""
         state = self.gh.read_state()
-        h = state.commits[-1].commit_hash
-        new_msg = "initial commit\n\nCreates the base structure.\nSigned-off-by: Alice"
+        i = next(idx for idx, c in enumerate(state.commits) if c.message == MULTILINE_COMMIT_MESSAGE)
+        h = state.commits[i + 1].commit_hash  # simple commit below multiline
+        new_msg = "rewound commit\n\nCreates the base structure.\nSigned-off-by: Alice"
         result = self.gh.reword(h, new_msg)
         self.assertTrue(result.ok, f"reword to multiline failed: {result}")
         msgs = [c.message for c in result.commits]
-        self.assertTrue(any("initial commit" in m for m in msgs))
+        self.assertTrue(any("rewound commit" in m for m in msgs))
 
     def test_fixup_multiline_commit_discards_body(self):
         """Fixup a commit with a multi-line message: the body must not appear in result."""
         state = self.gh.read_state()
-        h = state.commits[0].commit_hash
+        h = self._multiline_commit(state).commit_hash
         result = self.gh.fixup([h])
         self.assertTrue(result.ok, f"fixup of multiline commit failed: {result}")
         self.assertEqual(len(result.commits), len(state.commits) - 1)
         full_after = " ".join(c.message for c in result.commits)
-        self.assertNotIn("issue #42", full_after,
+        self.assertNotIn("Fixes #42", full_after,
                          "fixup'd commit body still present in result messages")
 
     def test_show_multiline_commit_returns_full_message(self):
         """show() must include the full multi-line message in its output."""
         state = self.gh.read_state()
-        h = state.commits[0].commit_hash
+        h = self._multiline_commit(state).commit_hash
         result = self.gh.show(h)
         self.assertTrue(result.ok, f"show() failed on multiline commit: {result}")
 
@@ -1219,13 +1194,26 @@ class SpacesInFilenamesTests(ChallengeBase):
 
     def setUp(self):
         super().setUp()
-        self.repo = _build_spaces_in_names_repo(self.tmpdir)
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       capture_output=True, check=True)
+        subprocess.run(["git", "remote", "remove", "origin"],
+                       cwd=str(self.repo), capture_output=True)
+        env1 = _commit_env("carol", 1000)
+        (self.repo / "my document.txt").write_bytes(b"draft\n")
+        (self.repo / "notes (draft).txt").write_bytes(b"notes\n")
+        subprocess.run(["git", "add", "--", "my document.txt", "notes (draft).txt"],
+                       cwd=str(self.repo), capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "Add files with spaces"],
+                       cwd=str(self.repo), env=env1, capture_output=True, check=True)
+        _commit_raw(self.repo, "my document.txt", b"final\n", "Update docs", "alice", 1001)
         self.gh = GitHistory(str(self.repo))
 
     def test_show_commit_with_spaced_filename_includes_filename_in_diff(self):
         """show() must include the space-containing filename in its diff output."""
         bm = self._by_msg()
-        result = self.gh.show(bm["add spaced files"])
+        result = self.gh.show(bm["Add files with spaces"])
         self.assertTrue(result.ok, f"show() failed on spaced-filename commit: {result}")
         self.assertIn("my document.txt", result.diff)
 
@@ -1234,32 +1222,33 @@ class SpacesInFilenamesTests(ChallengeBase):
         state = self.gh.read_state()
         bm = self._by_msg(state)
 
-        result = self.gh.squash([bm["add spaced files"], bm["update docs"]])
+        result = self.gh.squash([bm["Add files with spaces"], bm["Update docs"]])
         self.assertTrue(result.ok, f"squash with spaced filenames failed: {result}")
         self.assertEqual(len(result.commits), len(state.commits) - 1)
         files = _ls_tree(self.repo, "HEAD")
         self.assertIn("my document.txt", files)
 
     def test_fixup_commit_touching_spaced_filename(self):
-        """Fixup 'update docs' into 'add spaced files': commit count decreases by one."""
+        """Fixup 'Update docs' into 'Add files with spaces': commit count decreases by one."""
         state = self.gh.read_state()
         bm = self._by_msg(state)
 
-        result = self.gh.fixup([bm["update docs"]])
+        result = self.gh.fixup([bm["Update docs"]])
         self.assertTrue(result.ok, f"fixup with spaced filenames failed: {result}")
         self.assertEqual(len(result.commits), len(state.commits) - 1)
+
     def test_reword_commit_touching_spaced_file_preserves_tree(self):
         """Reword a commit that touches a spaced-name file: tree must be identical."""
         state = self.gh.read_state()
         bm = self._by_msg(state)
-        h = bm["add spaced files"]
+        h = bm["Add files with spaces"]
         old_tree = _git(self.repo, "git", "rev-parse", h + ":").stdout.strip()
 
-        result = self.gh.reword(h, "add files with spaces")
+        result = self.gh.reword(h, "renamed: add files with spaces")
         self.assertTrue(result.ok, f"reword with spaced filenames failed: {result}")
 
         new_bm = {c.message: c.commit_hash for c in result.commits}
-        new_h = new_bm.get("add files with spaces")
+        new_h = new_bm.get("renamed: add files with spaces")
         self.assertIsNotNone(new_h, "rewarded commit not found by new message")
         new_tree = _git(self.repo, "git", "rev-parse", new_h + ":").stdout.strip()
         self.assertEqual(old_tree, new_tree, "tree changed after reword of spaced-filename commit")
@@ -1269,7 +1258,7 @@ class SpacesInFilenamesTests(ChallengeBase):
         state = self.gh.read_state()
         bm = self._by_msg(state)
 
-        r1 = self.gh.squash([bm["add spaced files"], bm["update docs"]])
+        r1 = self.gh.squash([bm["Add files with spaces"], bm["Update docs"]])
         self.assertTrue(r1.ok)
 
         top = r1.commits[0]
@@ -1288,18 +1277,28 @@ class SpacesInFilenamesTests(ChallengeBase):
 class NearRootEdgeCaseTests(ChallengeBase):
     """Operations on repos with very few commits test root-commit boundary handling."""
 
+    def setUp(self):
+        super().setUp()
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       check=True, capture_output=True)
+
+    def _reset_to(self, tag):
+        subprocess.run(["git", "reset", "--hard", tag],
+                       cwd=str(self.repo), check=True, capture_output=True)
+        return GitHistory(str(self.repo))
+
     def test_read_state_single_commit_repo(self):
         """read_state on a one-commit repo must return exactly one commit."""
-        repo = _build_single_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-root")
         state = gh.read_state()
         self.assertTrue(state.ok)
         self.assertEqual(len(state.commits), 1)
 
     def test_show_root_commit(self):
         """show() on the root commit (no parent) must succeed."""
-        repo = _build_single_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-root")
         state = gh.read_state()
         h = state.commits[0].commit_hash
         result = gh.show(h)
@@ -1307,8 +1306,7 @@ class NearRootEdgeCaseTests(ChallengeBase):
 
     def test_squash_only_two_commits_in_repo(self):
         """Squash the only two commits: result is one commit, or fails cleanly."""
-        repo = _build_two_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-two")
         state = gh.read_state()
         hashes = [c.commit_hash for c in state.commits]
         self.assertEqual(len(hashes), 2)
@@ -1321,22 +1319,20 @@ class NearRootEdgeCaseTests(ChallengeBase):
 
     def test_fixup_non_root_into_root(self):
         """Fixup the only non-root commit into the root: one commit remains, or fails cleanly."""
-        repo = _build_two_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-two")
         state = gh.read_state()
         h_top = state.commits[0].commit_hash
 
         result = gh.fixup([h_top])
         if result.ok:
             self.assertEqual(len(result.commits), 1)
-            self.assertEqual(result.commits[0].message, "initial")
+            self.assertEqual(result.commits[0].message, "Initial commit")
         else:
             self.assert_recoverable(gh)
 
     def test_reword_root_commit(self):
         """Reword the root commit itself: message must change, or fail cleanly."""
-        repo = _build_two_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-two")
         state = gh.read_state()
         h_root = state.commits[-1].commit_hash
 
@@ -1349,8 +1345,7 @@ class NearRootEdgeCaseTests(ChallengeBase):
 
     def test_reset_to_root_in_two_commit_repo(self):
         """Reset to the root commit: HEAD moves to root and only one commit is visible."""
-        repo = _build_two_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-two")
         state = gh.read_state()
         h_root = state.commits[-1].commit_hash
 
@@ -1358,18 +1353,59 @@ class NearRootEdgeCaseTests(ChallengeBase):
         self.assertTrue(result.ok, f"reset to root failed: {result}")
         self.assertEqual(result.commits[0].commit_hash, h_root)
         self.assertEqual(len(result.commits), 1)
+
     def test_squash_on_single_commit_repo_fails_cleanly(self):
         """Squash with no second commit to fold into must fail without corrupting the repo."""
-        repo = _build_single_commit_repo(self.tmpdir)
-        gh = GitHistory(str(repo))
+        gh = self._reset_to("v-test-root")
         state = gh.read_state()
         h = state.commits[0].commit_hash
 
-        result = gh.squash([h])
-        if not result.ok:
-            self.assert_recoverable(gh)
-        else:
+        try:
+            result = gh.squash([h])
             self.assert_valid_state(result)
+        except GitHistoryError:
+            self.assert_recoverable(gh)
+
+
+# ---------------------------------------------------------------------------
+# 15. Empty / malformed reflog
+# ---------------------------------------------------------------------------
+
+@pytest.mark.release
+class EmptyReflogTests(ChallengeBase):
+    """Undo-stack parsing must degrade gracefully when the reflog is empty,
+    rather than raising — commits stay readable, the undo stack is just []."""
+
+    def setUp(self):
+        super().setUp()
+        persistent_repo = _ensure_persistent_test_repo()
+        self.repo = self.tmpdir / "repo"
+        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "reset", "--hard", "v-test-two"],
+                       cwd=str(self.repo), check=True, capture_output=True)
+        # Drop every reflog entry so `git reflog refs/heads/main` returns empty.
+        _git(self.repo, "git", "reflog", "expire", "--expire=all", "--all")
+        self.gh = GitHistory(str(self.repo))
+
+    def test_empty_reflog_yields_empty_undo_stack(self):
+        """An emptied reflog produces an empty undo stack with no crash."""
+        self.assertEqual(self.gh._list_undo_stack("main", {}), [])
+
+    def test_read_state_survives_empty_reflog(self):
+        """read_state still returns commits even when the undo stack is empty."""
+        state = self.gh.read_state()
+        self.assertTrue(state.ok)
+        self.assertGreater(len(state.commits), 0)
+        self.assertEqual(state.undo_stack, [])
+
+    def test_describe_rebase_group_handles_empty_group(self):
+        """The pure group classifier defaults to 'rebase' on no entries."""
+        self.assertEqual(GitHistory._describe_rebase_group([]), "rebase")
+
+    def test_filter_rebase_groups_handles_empty_input(self):
+        """The pure rebase-group filter returns [] on no entries."""
+        self.assertEqual(GitHistory._filter_rebase_groups([]), [])
 
 
 if __name__ == "__main__":

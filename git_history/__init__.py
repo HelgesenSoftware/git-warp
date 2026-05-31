@@ -11,26 +11,16 @@ import flask.cli
 
 import git_history.backend
 from git_history.rest_api import create_app
-from git_history.backend import GitHistory, ErrorResponse
+from git_history.backend import GitHistory, GitError, GitHistoryError, HistoryStateError
 
 
 def _get_history_index(gh):
-    """Get branch history and current HEAD index. Exits on error."""
-    if gh._in_rebase():
-        print("error: rebase in progress", file=sys.stderr)
-        sys.exit(1)
-    history = gh._list_branch_history()
-    if not history:
-        print("error: no history available", file=sys.stderr)
-        sys.exit(1)
-    head = gh._resolve_commit("HEAD")
-    hashes = [e.commit_hash for e in history]
+    """Get undo stack and current HEAD index. Exits on error."""
     try:
-        idx = hashes.index(head)
-    except ValueError:
-        print("error: HEAD not in branch history", file=sys.stderr)
+        return gh.get_history_state()
+    except HistoryStateError as e:
+        print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
-    return history, idx
 
 
 def _set_history_index(gh, history, target_idx):
@@ -38,9 +28,13 @@ def _set_history_index(gh, history, target_idx):
     if target_idx < 0 or target_idx >= len(history):
         print(f"error: target index {target_idx} out of range (0–{len(history)-1})", file=sys.stderr)
         sys.exit(1)
-    result = gh.reset(history[target_idx].commit_hash)
-    if isinstance(result, ErrorResponse):
-        print(f"error: {result.error}: {result.message}", file=sys.stderr)
+    try:
+        gh.reset(history[target_idx].commit_hash)
+    except GitHistoryError as e:
+        print(f"error: {e.code}: {e.message}", file=sys.stderr)
+        sys.exit(1)
+    except GitError as e:
+        print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"At history index {target_idx}.")
 
@@ -56,10 +50,11 @@ def main():
                         help="delete the log file and exit")
     parser.add_argument("--dark", action="store_true",
                         help="enable dark mode")
-    parser.add_argument("--undo", nargs="?", const=1, type=int, metavar="N",
-                        help="undo the last N operations (default: 1)")
-    parser.add_argument("--redo", nargs="?", const=1, type=int, metavar="N",
-                        help="redo the next N operations (default: 1)")
+    _undo_redo = parser.add_mutually_exclusive_group()
+    _undo_redo.add_argument("--undo", nargs="?", const=1, type=int, metavar="N",
+                            help="undo the last N operations (default: 1)")
+    _undo_redo.add_argument("--redo", nargs="?", const=1, type=int, metavar="N",
+                            help="redo the next N operations (default: 1)")
     args = parser.parse_args()
 
     if args.clear_log:
@@ -83,29 +78,22 @@ def main():
         print("fatal: git >= 2.26 required", file=sys.stderr)
         sys.exit(1)
 
-    # Must be inside a git repo.
-    r = subprocess.run(["git", "rev-parse", "--git-dir"],
-                       capture_output=True, text=True, check=False)
-    if r.returncode != 0:
-        print("fatal: not a git repository", file=sys.stderr)
-        sys.exit(1)
-
-    # Reject detached HEAD.
-    r = subprocess.run(["git", "symbolic-ref", "--quiet", "HEAD"],
-                       capture_output=True, text=True, check=False)
-    if r.returncode != 0:
-        print("fatal: HEAD is detached; checkout a branch first",
-              file=sys.stderr)
-        sys.exit(1)
-
     # Run as command line tool for undo/redo
-    if args.undo:
-        gh = GitHistory(os.getcwd())
+    if args.undo is not None:
+        try:
+            gh = GitHistory(os.getcwd())
+        except HistoryStateError as e:
+            print(f"fatal: {e}", file=sys.stderr)
+            sys.exit(1)
         history, idx = _get_history_index(gh)
         _set_history_index(gh, history, idx + args.undo)
         sys.exit(0)
-    if args.redo:
-        gh = GitHistory(os.getcwd())
+    if args.redo is not None:
+        try:
+            gh = GitHistory(os.getcwd())
+        except HistoryStateError as e:
+            print(f"fatal: {e}", file=sys.stderr)
+            sys.exit(1)
         history, idx = _get_history_index(gh)
         _set_history_index(gh, history, idx - args.redo)
         sys.exit(0)
@@ -119,7 +107,11 @@ def main():
     token = secrets.token_urlsafe(24)
     repo_path = os.getcwd()
 
-    app = create_app(repo_path, token)
+    try:
+        app = create_app(repo_path, token)
+    except HistoryStateError as e:
+        print(f"fatal: {e}", file=sys.stderr)
+        sys.exit(1)
 
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     flask.cli.show_server_banner = lambda *_: None

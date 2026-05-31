@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from make_test_repo import init_repo
 from conftest import _commit_raw
-from git_history.backend import GitHistory
+from git_history.backend import GitHistory, GitHistoryError
 from test_challenging import ChallengeBase, _git, _commit_env
 
 
@@ -105,17 +105,17 @@ class SubmoduleBase(ChallengeBase):
 # Helper method unit tests
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class HelperMethodTests(SubmoduleBase):
     """Direct tests of the four private helpers that power the submodule guards."""
 
     def test_get_gitmodules_empty_for_commit_without_submodule(self):
         bm = self._by_msg()
-        self.assertEqual(self.gh._get_gitmodules(bm["base"]), "")
+        self.assertEqual(self.gh._git.get_gitmodules(bm["base"]), "")
 
     def test_get_gitmodules_non_empty_for_commit_with_submodule(self):
         bm = self._by_msg()
-        content = self.gh._get_gitmodules(bm["add lib"])
+        content = self.gh._git.get_gitmodules(bm["add lib"])
         self.assertIn("[submodule", content)
         self.assertIn("lib", content)
 
@@ -123,47 +123,57 @@ class HelperMethodTests(SubmoduleBase):
         # bump lib only changes the gitlink, not .gitmodules
         bm = self._by_msg()
         self.assertEqual(
-            self.gh._get_gitmodules(bm["add lib"]),
-            self.gh._get_gitmodules(bm["bump lib"]),
+            self.gh._git.get_gitmodules(bm["add lib"]),
+            self.gh._git.get_gitmodules(bm["bump lib"]),
         )
 
     def test_get_gitmodules_identical_across_unrelated_commits(self):
         # update main doesn't touch submodules at all
         bm = self._by_msg()
         self.assertEqual(
-            self.gh._get_gitmodules(bm["bump lib"]),
-            self.gh._get_gitmodules(bm["update main"]),
+            self.gh._git.get_gitmodules(bm["bump lib"]),
+            self.gh._git.get_gitmodules(bm["update main"]),
         )
 
     def test_gitlinks_at_empty_for_commit_without_submodule(self):
         bm = self._by_msg()
-        self.assertEqual(self.gh._gitlinks_at(bm["base"]), {})
+        self.assertEqual(self.gh._git.gitlinks_at(bm["base"]), {})
 
     def test_gitlinks_at_v1_at_add_lib(self):
         bm = self._by_msg()
-        self.assertEqual(self.gh._gitlinks_at(bm["add lib"]), {"lib": self.v1})
+        self.assertEqual(self.gh._git.gitlinks_at(bm["add lib"]), {"lib": self.v1})
 
     def test_gitlinks_at_v2_at_bump_lib(self):
         bm = self._by_msg()
-        self.assertEqual(self.gh._gitlinks_at(bm["bump lib"]), {"lib": self.v2})
+        self.assertEqual(self.gh._git.gitlinks_at(bm["bump lib"]), {"lib": self.v2})
 
     def test_gitlinks_at_v2_at_update_main(self):
         # update main does not change the gitlink; pointer stays at v2
         bm = self._by_msg()
-        self.assertEqual(self.gh._gitlinks_at(bm["update main"]), {"lib": self.v2})
+        self.assertEqual(self.gh._git.gitlinks_at(bm["update main"]), {"lib": self.v2})
+
+    def test_gitlinks_changed_true_when_before_has_no_submodule(self):
+        # HEAD is "update main" ({"lib": v2}); base has no gitlink
+        bm = self._by_msg()
+        self.assertTrue(self.gh._gitlinks_changed(bm["base"]))
+
+    def test_gitlinks_changed_false_when_before_matches_head(self):
+        # bump lib already points at v2, same as HEAD
+        bm = self._by_msg()
+        self.assertFalse(self.gh._gitlinks_changed(bm["bump lib"]))
 
     def test_commit_touches_gitmodules_true_for_add_lib(self):
         bm = self._by_msg()
-        self.assertTrue(self.gh._commit_touches_gitmodules(bm["add lib"]))
+        self.assertTrue(self.gh._git.commit_touches_gitmodules(bm["add lib"]))
 
     def test_commit_touches_gitmodules_false_for_bump_lib(self):
         # Only the gitlink (160000 entry) changed; .gitmodules is untouched
         bm = self._by_msg()
-        self.assertFalse(self.gh._commit_touches_gitmodules(bm["bump lib"]))
+        self.assertFalse(self.gh._git.commit_touches_gitmodules(bm["bump lib"]))
 
     def test_commit_touches_gitmodules_false_for_unrelated_commit(self):
         bm = self._by_msg()
-        self.assertFalse(self.gh._commit_touches_gitmodules(bm["update main"]))
+        self.assertFalse(self.gh._git.commit_touches_gitmodules(bm["update main"]))
 
     def test_any_moved_touches_gitmodules_true_when_add_lib_repositioned(self):
         bm = self._by_msg()
@@ -197,24 +207,24 @@ class HelperMethodTests(SubmoduleBase):
 # Reset: .gitmodules guard
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class ResetGitmodulesGuardTests(SubmoduleBase):
 
     def test_reset_blocked_when_target_removes_gitmodules(self):
         # HEAD has .gitmodules; target "base" has none
         bm = self._by_msg()
-        result = self.gh.reset(bm["base"])
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_differ")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.reset(bm["base"])
+        self.assertEqual(cm.exception.code, "gitmodules_differ")
 
     def test_reset_blocked_when_resetting_forward_past_add_submodule(self):
         # Park HEAD at "base" (no .gitmodules), attempt redo to "add lib"
         bm = self._by_msg()
         _git(self.repo, "git", "reset", "--hard", bm["base"])
         self.gh = GitHistory(str(self.repo))
-        result = self.gh.reset(bm["add lib"])
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_differ")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.reset(bm["add lib"])
+        self.assertEqual(cm.exception.code, "gitmodules_differ")
 
     def test_reset_succeeds_when_gitmodules_identical_and_gitlink_changes(self):
         # HEAD = update main (lib=v2), target = add lib (lib=v1): same .gitmodules
@@ -257,24 +267,24 @@ class ResetGitmodulesGuardTests(SubmoduleBase):
         # .gitmodules identical between target and HEAD, but working tree is dirty
         bm = self._by_msg()
         (self.repo / "main.txt").write_bytes(b"dirty\n")
-        result = self.gh.reset(bm["add lib"])
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "dirty_tree")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.reset(bm["add lib"])
+        self.assertEqual(cm.exception.code, "dirty_tree")
 
     def test_gitmodules_check_takes_precedence_over_dirty_tree_check(self):
         # When both .gitmodules differs AND tree is dirty, gitmodules_differ is returned
         bm = self._by_msg()
         (self.repo / "main.txt").write_bytes(b"dirty\n")
-        result = self.gh.reset(bm["base"])
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_differ")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.reset(bm["base"])
+        self.assertEqual(cm.exception.code, "gitmodules_differ")
 
 
 # ---------------------------------------------------------------------------
 # submodule_update()
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class SubmoduleUpdateTests(SubmoduleBase):
 
     def test_submodule_update_after_reset_brings_lib_to_v1(self):
@@ -353,7 +363,7 @@ class SubmoduleUpdateTests(SubmoduleBase):
 # Rebase move: .gitmodules guard
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class RebaseMoveGitmodulesTests(SubmoduleBase):
 
     def test_move_blocked_when_add_lib_is_repositioned(self):
@@ -362,9 +372,9 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         # Move add lib to the front
         idx = order.index(bm["add lib"])
         order.insert(0, order.pop(idx))
-        result = self.gh.move(order)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_in_range")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.move(order)
+        self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
     def test_move_blocked_when_add_lib_is_moved_down(self):
         # Move add lib toward the bottom; still blocked because it changes position
@@ -372,9 +382,9 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         order = self._order()
         idx = order.index(bm["add lib"])
         order.append(order.pop(idx))  # move to last position
-        result = self.gh.move(order)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_in_range")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.move(order)
+        self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
     def test_move_allowed_when_only_bump_lib_is_repositioned(self):
         # bump lib only changes the gitlink, not .gitmodules — reorder must succeed
@@ -409,9 +419,9 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         # Rotate all four commits: add lib is among the movers
         order = self._order()
         rotated = order[1:] + [order[0]]
-        result = self.gh.move(rotated)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_in_range")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.move(rotated)
+        self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
     def test_move_preserves_gitlink_after_reorder_of_non_gitmodules_commits(self):
         # After a permitted move, the gitlink entry must still exist in HEAD
@@ -432,7 +442,10 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         order = self._order()
         idx = order.index(bm["add lib"])
         order.insert(0, order.pop(idx))
-        self.gh.move(order)
+        try:
+            self.gh.move(order)
+        except GitHistoryError:
+            pass
         state = self.gh.read_state()
         self.assertFalse(state.rebase_in_progress)
         self.assertFalse(state.dirty)
@@ -442,7 +455,7 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
 # Squash / fixup / reword with submodule commits (these must still work)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class SubmoduleRebaseOperationsTests(SubmoduleBase):
     """Squash, fixup, and reword on commits that touch submodules must still work."""
 
@@ -536,7 +549,7 @@ def _build_repo_commits_after_gitmodules(parent: Path):
 # Rebase operations on commits above .gitmodules
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class RebaseAfterGitmodulesTests(ChallengeBase):
     """
     Verify that move, reword, fixup, and squash on commits that sit above a
@@ -599,9 +612,9 @@ class RebaseAfterGitmodulesTests(ChallengeBase):
         order = self._order()
         al_idx = order.index(bm["add lib"])
         order.insert(0, order.pop(al_idx))
-        result = self.gh.move(order)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "gitmodules_in_range")
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.move(order)
+        self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
     # -- reword --------------------------------------------------------------
 
@@ -703,7 +716,7 @@ def _build_two_branch_submodule_repo(parent: Path):
     return repo, v1, v2
 
 
-@pytest.mark.release
+@pytest.mark.submodule
 class SwitchBranchSubmoduleTests(ChallengeBase):
 
     def setUp(self):
@@ -749,6 +762,26 @@ class SwitchBranchSubmoduleTests(ChallengeBase):
             result.submodule_update_suggested,
             "should not suggest update when repo has no submodules",
         )
+
+    def test_switch_blocked_when_gitmodules_differ(self):
+        # 'base' has no submodule, so its .gitmodules content differs from main's.
+        bm = {c.message: c.commit_hash for c in self.gh.read_state().commits}
+        _git(self.repo, "git", "branch", "nosub", bm["base"])
+        head_before = _git(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        with self.assertRaises(GitHistoryError) as cm:
+            self.gh.switch_branch("nosub")
+        self.assertEqual(cm.exception.code, "gitmodules_differ")
+        self.assertEqual(
+            _git(self.repo, "git", "rev-parse", "HEAD").stdout.strip(), head_before,
+            "blocked switch must not move HEAD",
+        )
+
+    def test_switch_proceeds_when_allow_different_gitmodules(self):
+        bm = {c.message: c.commit_hash for c in self.gh.read_state().commits}
+        _git(self.repo, "git", "branch", "nosub", bm["base"])
+        result = self.gh.switch_branch("nosub", allow_different_gitmodules=True)
+        self.assertTrue(result.ok, f"forced switch failed: {result}")
+        self.assertEqual(_git(self.repo, "git", "rev-parse", "HEAD").stdout.strip(), bm["base"])
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +836,7 @@ def _build_repo_trivials_above_gitlink(parent: Path):
 # Regression: rebase on commits above a gitlink must not replay the gitlink
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class TrivialCommitsAboveGitlinkTests(ChallengeBase):
 
     def setUp(self):

@@ -47,23 +47,25 @@ strong { font-weight: 600; }
 
   <h2>Starting the app</h2>
   <p>Run from inside any git repository:</p>
-  <pre>git-history [&lt;start&gt;] [--port &lt;N&gt;] [--clear-log]</pre>
+  <pre>git-history [--port &lt;N&gt;] [--clear-log] [--dark] [--undo [N] | --redo [N]]</pre>
   <ul>
-    <li><code>&lt;start&gt;</code> — oldest commit to show (default: <code>HEAD~200</code>)</li>
     <li><code>--port &lt;N&gt;</code> — TCP port for the server (default: auto-assigned)</li>
     <li><code>--clear-log</code> — delete the operation log (<code>~/.git-history.log</code>) and exit</li>
+    <li><code>--dark</code> — enable dark mode</li>
+    <li><code>--undo [N]</code> — undo the last N operations (default: 1)</li>
+    <li><code>--redo [N]</code> — redo the next N operations (default: 1)</li>
   </ul>
   <p>The browser opens automatically. The terminal shows the URL and port.</p>
 
   <h2>Uncommitted changes</h2>
-  <p>Reorder, squash, fixup, reword, and reset are all blocked when the working tree has uncommitted changes. Use <strong>Stash</strong> to set them aside, perform your rebase operations, then <strong>Stash Pop</strong> to restore them.</p>
+  <p>Reorder, squash, fixup, reword, reset, and branch create/delete are all blocked when the working tree has uncommitted changes. Use <strong>Stash</strong> to set them aside, perform your operations, then <strong>Stash Pop</strong> to restore them.</p>
 
   <h2>Toolbar</h2>
   <p><strong>Branch</strong> — a dropdown showing the current branch. Select a different local branch to switch to it. Blocked when there are uncommitted changes or a rebase is in progress.</p>
   <p><strong>Squash</strong> — appears when two or more commits are selected. Combines them into one commit; the message is the combined messages of all selected commits.</p>
   <p><strong>Stash</strong> — appears when there are uncommitted changes. Runs <code>git stash push</code>, clearing the working tree so rebase operations can proceed.</p>
   <p><strong>Stash Pop</strong> — appears when a stash exists. Runs <code>git stash pop</code>, restoring the previously stashed changes. Requires a clean working tree.</p>
-  <p><strong>Refresh</strong> — reloads the commit list and branch history from the repository. The list also refreshes automatically when you switch back to the browser tab, so you rarely need this button.</p>
+  <p><strong>Refresh</strong> — reloads the commit list and Undo Stack from the repository. The list also refreshes automatically when you switch back to the browser tab, so you rarely need this button.</p>
   <p><strong>Quit (×)</strong> — stops the git-history server and attempts to close the tab. Closing the browser tab without clicking Quit does not stop the server; it can still be stopped with Ctrl+C in the terminal.</p>
 
   <h2>Commit History</h2>
@@ -72,27 +74,30 @@ strong { font-weight: 600; }
     <li><strong>Reorder</strong> — drag one or more commits up or down. Press Escape to cancel.</li>
     <li><strong>Select multiple</strong> — click a commit, then Shift-click another to select the range. Press Escape to deselect.</li>
     <li><strong>Squash</strong> — select two or more commits, then click the Squash button in the toolbar. The messages of all selected commits are combined.</li>
-    <li><strong>Fixup</strong> — hover a commit to reveal the Fixup button (↵). Folds that commit into the one below it, discarding its message.</li>
-    <li><strong>Reword</strong> — select a commit, then click the Reword button in the toolbar to edit its message in place. Confirm with Ctrl+Enter (Cmd+Enter on Mac) or by clicking outside. Press Escape to cancel.</li>
-    <li><strong>Reset</strong> — double-click a commit to reset the branch to that commit. Requires a clean working tree.</li>
+    <li><strong>Fixup</strong> — hover a commit to reveal the Fixup button. Folds that commit into the one below it, discarding its message.</li>
+    <li><strong>Reword</strong> — right-click a commit and choose <strong>Edit commit message</strong> to edit its message in place. Confirm with Ctrl+Enter (Cmd+Enter on Mac) or by clicking outside. Press Escape to cancel.</li>
+    <li><strong>Reset</strong> — right-click a commit and choose <strong>Reset branch to here</strong> to reset the branch to that commit. Requires a clean working tree.</li>
+    <li><strong>Create branch</strong> — right-click a commit and choose <strong>Create new branch</strong>, then enter a name. Requires a clean working tree.</li>
+    <li><strong>Delete branch</strong> — right-click a branch badge and choose <strong>Delete Branch</strong>. The current branch cannot be deleted, and an unmerged branch is refused to avoid losing commits. Requires a clean working tree.</li>
+    <li><strong>Split</strong> — select a single commit, then in the diff pane click the files to move out (Shift-click for a range) and click <strong>Split Commit</strong>. The commit is replaced by two commits — the unselected files, then the selected files — each keeping the original author and message. Available for a commit with at least two files. Requires a clean working tree.</li>
   </ul>
   <p>If a rebase produces a merge conflict, a dialog appears. Resolve the conflict in your editor, then click Continue — or click Cancel to abort and return to the original state.</p>
   <p><em>Tip: drag related commits together first, then squash or fixup.</em></p>
 
-  <h2>Branch History</h2>
+  <h2>Undo Stack</h2>
   <p>An undo stack for your local branch. Each entry is a unique state of the branch tip, recorded chronologically from when the branch was created.</p>
   <ul>
     <li><strong>Undo / Redo</strong> — step backwards or forwards through history.</li>
-    <li><strong>Double-click</strong> an entry to reset the branch to that state. Requires a clean working tree.</li>
+    <li><strong>Right-click</strong> an entry and choose <strong>Reset to here</strong> to reset the branch to that state. Requires a clean working tree.</li>
     <li><strong>Group consecutive rebases</strong> — collapses adjacent rebase entries into one, reducing noise.</li>
   </ul>
-  <p>The branch history reflects all local changes — commits, rebases, resets — whether made inside or outside git-history. When you pull or rebase from the remote, the update appears as a single entry.</p>
-  <p><em>Note: branch history is kept as long as git's reflog retention settings allow (configured by <code>gc.reflogExpireUnreachable</code>, typically 30 days). Once commits are no longer reachable from the branch, they may be garbage collected and their history entries will expire.</em></p>
+  <p>The Undo Stack reflects all local changes — commits, rebases, resets — whether made inside or outside git-history. When you pull or rebase from the remote, the update appears as a single entry.</p>
+  <p><em>Note: the Undo Stack is kept as long as git's reflog retention settings allow (configured by <code>gc.reflogExpireUnreachable</code>, typically 30 days). Once commits are no longer reachable from the branch, they may be garbage collected and their entries will expire.</em></p>
   <p><em>Tip: a failed rebase can always be recovered with <code>git rebase --abort</code> in the terminal.</em></p>
 
   <h2>Submodules</h2>
   <p>Moving commits that touch <code>.gitmodules</code> is blocked — reordering such commits can corrupt submodule references and must be done manually.</p>
-  <p>Resetting to a branch history entry is blocked when the target has a different <code>.gitmodules</code> file. If the reset succeeds but changes submodule commit pointers, a banner appears offering to run <code>git submodule update --init</code>.</p>
+  <p>Resetting to an Undo Stack entry is blocked when the target has a different <code>.gitmodules</code> file. If the reset succeeds but changes submodule commit pointers, a modal confirm appears offering to run <code>git submodule update --init</code>.</p>
 </div>
 </body>
 </html>

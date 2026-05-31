@@ -44,7 +44,7 @@ Drag-and-drop and conflict abort are covered by automated tests.
 | # | Step | Expected |
 |---|------|----------|
 | 1 | With a repo that has multiple local branches, open the app | Branch dropdown shows current branch, all local branches listed |
-| 2 | Select a different branch from the dropdown | Commit list and branch history update to the new branch; toolbar shows new branch name |
+| 2 | Select a different branch from the dropdown | Commit list and Undo Stack update to the new branch; toolbar shows new branch name |
 | 3 | Make a change without committing, then try to switch branches via the dropdown | Switch branch is not permitted |
 
 ---
@@ -54,7 +54,7 @@ Drag-and-drop and conflict abort are covered by automated tests.
 | # | Step | Expected |
 |---|------|----------|
 | 1 | In a repo with a submodule, find a commit that modifies `.gitmodules`, then drag it to a different position | Operation refused with an error message |
-| 2 | Reset (double-click in branch history) to an entry where submodule commit pointers differ but `.gitmodules` is unchanged | Reset succeeds; user is prompted to "Update submodules"|
+| 2 | Reset (double-click in the Undo Stack) to an entry where submodule commit pointers differ but `.gitmodules` is unchanged | Reset succeeds; user is prompted to "Update submodules"|
 
 ---
 

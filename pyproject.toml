@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "git-history"
-version = "0.0.5"
-requires-python = ">=3.9"
+version = "0.0.6"
+requires-python = ">=3.10"
 # Requires git >= 2.26 (for --empty=keep support in git rebase)
 dependencies = ["flask>=3.0"]
 
@@ -27,8 +27,11 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*", "*Tests"]
 python_functions = ["test_*"]
-markers = ["release: tests for edge cases, error conditions, and features that don't need to run on every commit"]
-addopts = "-m \"not release\" -n auto --dist=loadscope"
+markers = [
+    "release: tests for edge cases, error conditions, and features that don't need to run on every commit",
+    "submodule: tests for submodule functionality"
+]
+addopts = "-m \"not release and not submodule\" -n auto --dist=loadscope"
 
 [tool.pylint.messages_control]
 disable = ["missing-docstring"]

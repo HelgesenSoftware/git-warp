@@ -50,13 +50,13 @@ COMMITS = [
      "alice",
      [("README.md",
        "# Todo App\n\nA simple web application for managing tasks.\n")],
-     None),
+     "v-test-root"),
 
     ("Add LICENSE",
      "alice",
      [("LICENSE",
        "MIT License\n\nCopyright (c) 2026 Todo App Authors\n")],
-     None),
+     "v-test-two"),
 
     ("Add .gitignore",
      "alice",
@@ -109,10 +109,7 @@ COMMITS = [
 
     ("Add integration tests",
      "alice",
-     [("tests/__init__.py", ""),
-      ("tests/test_integration.py",
-       "def test_app_starts():\n    assert True\n\n"
-       "def test_homepage_returns_200():\n    assert True\n")],
+     [("tests/__init__.py", "")],
      "v1.0.0"),
 
     # ── pages: Step 1 is oldest, Step 5 is newest ────────────────────────────
@@ -162,7 +159,18 @@ COMMITS = [
        "LOGIN_CSS = 'form { max-width: 400px; margin: auto; }'\n")],
      None),
 
+    # ── merge commit: test merge handling in interactive rebase ────────────────
+    ("Merge feature work",
+     "alice",
+     [("__merge_commit__", "feature-work.txt")],
+     None),
+
     # ── background commits ────────────────────────────────────────────────────
+    # "Add user dashboard" is the reset target for TaggedCommitTests (no tag).
+    # "Add admin panel" carries the annotated test tag and "Add deployment config"
+    # carries the lightweight test tag.  All three sit above the merge commit so
+    # rebase operations on the tagged commits do not need to replay the merge,
+    # and "Add admin panel"'s predecessor is a plain commit (not a merge).
     ("Add user dashboard",
      "carol",
      [("pages/dashboard.py",
@@ -173,13 +181,13 @@ COMMITS = [
      "alice",
      [("pages/admin.py",
        "def admin_panel():\n    return '<h1>Admin</h1>'\n")],
-     None),
+     ("v-test-ann", "Test annotated tag")),
 
     ("Add deployment config",
      "alice",
      [("scripts/deploy.sh",
        "#!/bin/sh\nset -e\necho 'deploying todo app'\n")],
-     None),
+     "v-test-lw"),
 
     ("Add error pages",
      "bob",
@@ -194,7 +202,12 @@ COMMITS = [
      [("__submodule_update__", "lib")],
      None),
 
-    ("Add Makefile",
+    ("Fix: handle edge\tcase\n\n"
+     "This commit:\n"
+     "\t- has \"double\" and 'single' quotes\n"
+     "\t- backslash C:\\path\\to\\file\n"
+     "\t- unicode: café, naïve, 日本語 🎉\n\n"
+     "Fixes #42",
      "carol",
      [("Makefile",
        ".PHONY: test\ntest:\n\tpython -m pytest tests/ -v\n")],
@@ -323,7 +336,34 @@ def write_file(repo, relpath, content):
 
 def make_commit(repo, index, message, author_key, files, tag, *, sub):
     for relpath, content in files:
-        if relpath == "__submodule_add__":
+        if relpath == "__merge_commit__":
+            # Create feature branch off the parent commit, add a file, then merge back with --no-ff
+            feature_file = content.strip()
+
+            # Save current HEAD
+            parent_hash = run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+
+            # Create and checkout feature-work branch from HEAD~1
+            run(["git", "checkout", "-b", "feature-work", f"{parent_hash}~1"], repo)
+
+            # Add a commit on the feature branch (day before the merge)
+            write_file(repo, feature_file, f"Feature work on {feature_file}\n")
+            run(["git", "add", "--", feature_file], repo)
+            author_name, author_email = AUTHORS[author_key]
+            when_feature = (BASE_DATE + timedelta(days=index * DAYS_BETWEEN_COMMITS - 1)).isoformat()
+            run(["git", "commit", "-m", f"Feature: {feature_file}"], repo,
+                env=_git_env(author_name, author_email, when_feature))
+
+            # Checkout main and merge with --no-ff (on the scheduled day)
+            run(["git", "checkout", "main"], repo)
+            when_merge = (BASE_DATE + timedelta(days=index * DAYS_BETWEEN_COMMITS)).isoformat()
+            run(["git", "merge", "--no-ff", "feature-work", "-m", message], repo,
+                env=_git_env(author_name, author_email, when_merge))
+
+            # Delete the feature branch
+            run(["git", "branch", "-D", "feature-work"], repo)
+            return
+        elif relpath == "__submodule_add__":
             path = content.strip()
             run(["git", "-c", "protocol.file.allow=always",
                  "submodule", "add", sub["url"], path], repo)
@@ -348,7 +388,10 @@ def make_commit(repo, index, message, author_key, files, tag, *, sub):
     run(["git", "commit", "-m", message], repo,
         env=_git_env(author_name, author_email, when))
     if tag:
-        run(["git", "tag", tag], repo)
+        if isinstance(tag, tuple):
+            run(["git", "tag", "-a", tag[0], "-m", tag[1]], repo)
+        else:
+            run(["git", "tag", tag], repo)
 
 
 def _remove(path):

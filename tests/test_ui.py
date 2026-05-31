@@ -46,17 +46,17 @@ def _setup_ui_server(tmp_path_factory, prefix):
 
 
 @pytest.fixture
-def live_server(tmp_path_factory):
+def ui_live_server(tmp_path_factory):
     yield from _setup_ui_server(tmp_path_factory, "ui-work")
 
 
 @pytest.fixture
-def drag_server(tmp_path_factory):
+def ui_drag_server(tmp_path_factory):
     yield from _setup_ui_server(tmp_path_factory, "ui-drag")
 
 
 @pytest.fixture
-def conflict_server(tmp_path_factory):
+def ui_conflict_server(tmp_path_factory):
     yield from _setup_ui_server(tmp_path_factory, "ui-conflict")
 
 
@@ -65,38 +65,27 @@ def _row(page, message):
 
 
 def drag_row(page, source_locator, target_locator, position="above"):
-    """Simulate a mousedown/mousemove/mouseup drag using the row's drag handle."""
+    """Simulate an HTML5 drag by dispatching DragEvents directly."""
     try:
-        # Ensure elements are visible and scrolled into view
         source_locator.scroll_into_view_if_needed()
         target_locator.scroll_into_view_if_needed()
 
-        source_visible = source_locator.is_visible()
-        target_visible = target_locator.is_visible()
-        if not source_visible or not target_visible:
-            raise RuntimeError(f"Locators not visible: source={source_visible}, target={target_visible}")
+        if not source_locator.is_visible() or not target_locator.is_visible():
+            raise RuntimeError("Locators not visible")
 
-        handle = source_locator.locator(".drag-handle")
-        src = handle.bounding_box()
-        if not src:
-            raise RuntimeError(f"Source handle bounding box is None")
+        source_el = source_locator.element_handle()
+        target_el = target_locator.element_handle()
 
-        sx = src["x"] + src["width"] / 2
-        sy = src["y"] + src["height"] / 2
-        page.mouse.move(sx, sy)
-        page.mouse.down()
-        page.mouse.move(sx, sy + 3)  # small move to trigger onDragMove
-
-        tgt = target_locator.bounding_box()
-        if not tgt:
-            raise RuntimeError(f"Target bounding box is None")
-
-        if position == "above":
-            dy = tgt["y"] + 2
-        else:
-            dy = tgt["y"] + tgt["height"] - 2
-        page.mouse.move(tgt["x"] + tgt["width"] / 2, dy)
-        page.mouse.up()
+        page.evaluate("""([src, tgt, pos]) => {
+            const handle = src.querySelector('.drag-handle');
+            handle.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
+            const rect = tgt.getBoundingClientRect();
+            const clientY = pos === 'above' ? rect.top + 2 : rect.bottom - 2;
+            const list = document.querySelector('#commits-list');
+            list.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer(), clientY }));
+            list.dispatchEvent(new DragEvent('drop',    { bubbles: true, cancelable: true, dataTransfer: new DataTransfer(), clientY }));
+            list.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+        }""", [source_el, target_el, position])
     except Exception as e:
         print(f"ERROR in drag_row: {e}")
         raise
@@ -125,11 +114,10 @@ def drag_row_and_wait(page, source_locator, target_locator, position="above"):
     page.remove_listener("response", capture_response)
 
     if not response_received:
-        # Debug: show what responses we got
-        api_responses = [r for r in all_responses if "/api/" in r]
-        print(f"DEBUG: Got {len(all_responses)} responses total, {len(api_responses)} API responses")
-        print(f"DEBUG: API responses: {api_responses}")
-        raise TimeoutError(f"No /api/rebase response received within 15 seconds (got {len(api_responses)} API calls)")
+        raise TimeoutError(f"No /api/rebase response received within 15 seconds")
+
+    # Wait for render() to complete — hideSpinner() fires after handleResponse, which calls render()
+    page.wait_for_selector("#spinner", state="hidden", timeout=5000)
 
 
 def _selected_idx(page):
@@ -140,14 +128,15 @@ def _selected_idx(page):
     }""")
 
 
-def test_all_ui(page, live_server, drag_server, conflict_server):
+@pytest.mark.release
+def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
     # Live server tests (all use the same page, continuous mutations)
-    page.goto(live_server["url"])
+    page.goto(ui_live_server["url"])
     page.wait_for_selector(".commit-row")
 
     # Section 1: Basic page load and initial state
-    assert page.locator(".commit-row").count() == 26
-    assert page.locator(".branch-history-row").count() > 0
+    assert page.locator(".commit-row").count() == 28
+    assert page.locator(".undo-stack-row").count() > 0
 
     # Section 2: Selection and action bar
     assert not page.locator("#btn-squash").is_visible()
@@ -161,9 +150,10 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     oldest.hover()
     assert oldest.locator("button[title='Fixup']").is_disabled()
 
-    # Section 4: Inline reword via toolbar button
-    page.locator(".commit-row").nth(0).click()
-    page.locator("#btn-reword").click()
+    # Section 4: Inline reword via context menu
+    page.locator(".commit-row").nth(0).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    page.locator("#ctx-reword").click()
     ta = page.locator(".reword-input")
     ta.wait_for()
     ta.fill("reworded message")
@@ -171,10 +161,11 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     page.wait_for_function("!document.querySelector('.reword-input')")
     assert page.locator(".commit-row").nth(0).locator(".message").inner_text() == "reworded message"
 
-    # Section 5: Branch history group consecutive rebases
+    # Section 5: Undo stack group consecutive rebases
     for msg in ["first reword", "second reword"]:
-        page.locator(".commit-row").nth(0).click()
-        page.locator("#btn-reword").click()
+        page.locator(".commit-row").nth(0).click(button="right")
+        page.wait_for_selector("#context-menu:not(.hidden)")
+        page.locator("#ctx-reword").click()
         ta = page.locator(".reword-input")
         ta.wait_for()
         ta.fill(msg)
@@ -186,24 +177,25 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     page.locator(".commit-row").nth(2).hover()
     page.locator(".commit-row").nth(2).locator("button[title='Fixup']").click()
     page.wait_for_function(f"document.querySelectorAll('.commit-row').length === {count_before - 1}")
-    assert _selected_idx(page) == 1
+    assert _selected_idx(page) == 2
 
     # Section 7: Squash preserves selection (25 → 24)
     count_before = page.locator(".commit-row").count()
     page.locator(".commit-row").nth(2).click()
     page.locator(".commit-row").nth(3).click(modifiers=["Shift"])
-    with page.expect_response("**/api/rebase"):
+    with page.expect_response("**/api/rebase/**"):
         page.locator("#btn-squash").click()
     page.wait_for_function(f"document.querySelectorAll('.commit-row').length === {count_before - 1}")
     assert _selected_idx(page) == 2
 
     # Section 8: Reword preserves selection (24 still)
-    page.locator(".commit-row").nth(3).click()
-    page.locator("#btn-reword").click()
+    page.locator(".commit-row").nth(3).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    page.locator("#ctx-reword").click()
     ta = page.locator(".reword-input")
     ta.wait_for()
     ta.fill("reworded message 2")
-    with page.expect_response("**/api/rebase"):
+    with page.expect_response("**/api/rebase/**"):
         ta.press("Control+Enter")
     page.wait_for_function("!document.querySelector('.reword-input')")
     assert _selected_idx(page) == 3
@@ -224,30 +216,34 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     page.wait_for_function(f"document.querySelectorAll('.commit-row').length === {count_before - 1}")
     assert page.locator(".commit-row").count() == count_before - 1
 
-    # Section 11: Dblclick on non-HEAD commit resets branch to that commit
+    # Section 11: Right-click on non-HEAD commit resets branch to that commit
     count_before = page.locator(".commit-row").count()
     target_hash = page.locator(".commit-row").nth(2).get_attribute("data-commit-hash")
+    page.locator(".commit-row").nth(2).click(button="right")
     with page.expect_response("**/api/reset"):
-        page.locator(".commit-row").nth(2).dblclick()
+        page.locator("#ctx-reset").click()
     page.wait_for_function(f"document.querySelectorAll('.commit-row').length === {count_before - 2}")
     assert page.locator(".commit-row").nth(0).get_attribute("data-commit-hash") == target_hash
-    # Confirm submodule update if the reset triggered the modal
-    if page.evaluate("() => !document.getElementById('submodule-modal').classList.contains('hidden')"):
+    # Confirm submodule update if the reset crossed the submodule-pointer commit and
+    # triggered the modal (the generic prompt-modal is reused for this confirmation).
+    if page.evaluate("() => !document.getElementById('prompt-modal').classList.contains('hidden')"):
         with page.expect_response("**/api/submodule/update"):
-            page.locator("#btn-submodule-ok").click()
-        page.wait_for_function("document.getElementById('submodule-modal').classList.contains('hidden')")
+            page.locator("#prompt-modal-ok").click()
+        page.wait_for_function("document.getElementById('prompt-modal').classList.contains('hidden')")
 
-    # Section 12: Dblclick on HEAD commit does not reset
+    # Section 12: Right-click on HEAD commit does not show reset
     head_hash = page.locator(".commit-row").nth(0).get_attribute("data-commit-hash")
     count_before = page.locator(".commit-row").count()
-    page.locator(".commit-row").nth(0).dblclick()
+    page.locator(".commit-row").nth(0).click(button="right")
+    assert page.locator("#ctx-reset").is_hidden()
+    page.keyboard.press("Escape")
     page.wait_for_timeout(400)
     assert page.locator(".commit-row").count() == count_before
     assert page.locator(".commit-row").nth(0).get_attribute("data-commit-hash") == head_hash
 
-    # Section 13: Stash button when dirty and stash/pop combined (end of live_server tests)
+    # Section 13: Stash button when dirty and stash/pop combined (end of ui_live_server tests)
     assert not page.locator("#btn-stash").is_visible()
-    (live_server["repo"] / "README.md").write_text("modified")
+    (ui_live_server["repo"] / "README.md").write_text("modified")
     page.locator("#btn-refresh").click()
     page.wait_for_selector("#btn-stash", state="visible")
     assert page.locator("#btn-stash").is_visible()
@@ -259,7 +255,7 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     assert page.locator("#btn-stash").is_visible()
 
     # Drag server tests (new page via goto)
-    page.goto(drag_server["url"])
+    page.goto(ui_drag_server["url"])
     page.wait_for_selector(".commit-row")
 
     # Section 12: Drag to same position is noop (non-mutating, run first)
@@ -275,92 +271,90 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     assert result == original
 
     # Section 13: Mid-drag visual state — drop indicator, data-dragging attribute, dragged-row opacity.
-    # Small +3px move only: triggers onDragMove (creates indicator) but keeps DOM order unchanged
-    # so mouse.up does not fire a rebase that would leak state into Section 15.
-    handle = page.locator(".commit-row").nth(0).locator(".drag-handle")
-    src = handle.bounding_box()
-    page.mouse.move(src["x"] + src["width"] / 2, src["y"] + src["height"] / 2)
-    page.mouse.down()
-    page.mouse.move(src["x"] + src["width"] / 2, src["y"] + src["height"] / 2 + 3)
+    # Dispatch HTML5 drag events directly: dragstart sets data-dragging and .dragging class,
+    # dragover creates the drop indicator. Dragend (no drop) cancels without triggering a rebase.
+    page.evaluate("""() => {
+        const handle = document.querySelector('.commit-row .drag-handle');
+        handle.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
+    }""")
+    page.evaluate("""() => {
+        const list = document.querySelector('#commits-list');
+        const rect = list.getBoundingClientRect();
+        list.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer(), clientY: rect.top + 5 }));
+    }""")
     assert page.locator(".drop-indicator").count() > 0
     assert page.locator("#commits-list[data-dragging]").count() == 1
-    assert page.evaluate("document.querySelector('.commit-row.dragging').style.opacity") == "0.4"
-    page.mouse.up()
+    assert page.evaluate("getComputedStyle(document.querySelector('.commit-row.dragging')).opacity") == "0.4"
+    page.evaluate("""() => {
+        document.querySelector('#commits-list').dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+    }""")
 
     # Reload to reset state for mutating tests
     page.reload()
     page.wait_for_selector(".commit-row")
 
-    # Section 15: Drag reorder step commits (must run first due to state dependency)
+    # Section 15: Drag reorder commits (must run first due to state dependency).
+    # Reorder three commits near HEAD; dragging deeper commits would replay the
+    # whole upper history for the same test result.
     drag_row_and_wait(page,
-        _row(page, "Step 5/5: Add settings page"),
-        _row(page, "Step 3/5: Add search page"),
+        _row(page, "Add admin panel"),
+        _row(page, "Add error pages"),
         "above")
     drag_row_and_wait(page,
-        _row(page, "Step 4/5: Add contact page"),
-        _row(page, "Step 3/5: Add search page"),
+        _row(page, "Add deployment config"),
+        _row(page, "Add error pages"),
         "above")
     all_messages = [r.get_attribute("data-message")
                     for r in page.locator(".commit-row").all()]
-    step_messages = [m for m in all_messages if m and m.startswith("Step")]
-    assert step_messages == [
-        "Step 5/5: Add settings page",
-        "Step 4/5: Add contact page",
-        "Step 3/5: Add search page",
-        "Step 2/5: Add about page",
-        "Step 1/5: Create homepage",
+    reordered = [m for m in all_messages
+                 if m in {"Add error pages", "Add deployment config", "Add admin panel"}]
+    assert reordered == [
+        "Add admin panel",
+        "Add deployment config",
+        "Add error pages",
     ]
 
     # Section 16: Drag group of selected commits
-    # Reload to get fresh state for this test (matches backend test's fresh state)
-    page.reload()
-    page.wait_for_selector(".commit-row")
-
-    # Get initial messages at indices 5 and 6 (like backend test)
+    page.wait_for_timeout(200)
     msgs_before = [r.get_attribute("data-message")
                    for r in page.locator(".commit-row").all()]
     msg5_before = msgs_before[5]
     msg6_before = msgs_before[6]
 
-    # Select both commits using click and Shift+click (indices 5 and 6)
     page.locator(".commit-row").nth(5).click()
     page.locator(".commit-row").nth(6).click(modifiers=["Shift"])
 
-    # Drag the selected group to below row 8 (moving them to after index 8, like backend test)
     drag_row_and_wait(page,
         page.locator(".commit-row").nth(5),
         page.locator(".commit-row").nth(8),
         "below")
 
-    # Get final messages
     msgs_after = [r.get_attribute("data-message")
                   for r in page.locator(".commit-row").all()]
 
-    # Original commits 5 and 6 should now be at indices > 6 (like backend test)
     assert msgs_after.index(msg5_before) > 6
     assert msgs_after.index(msg6_before) > 6
-
-    # Same set of messages, just reordered (like backend test)
     assert sorted(msgs_after) == sorted(msgs_before)
 
     # Section 17: Drag preserves selection
-    # Reload to get fresh state for this test
-    page.reload()
-    page.wait_for_selector(".commit-row")
-    msg_at_0 = page.locator(".commit-row").nth(0).get_attribute("data-message")
+    page.wait_for_timeout(500)
+    # Select commit at index 2 before dragging (selection preservation works on selected commits)
+    page.locator(".commit-row").nth(2).click()
+    msg_at_2 = page.locator(".commit-row").nth(2).get_attribute("data-message")
+    page.wait_for_timeout(100)
     drag_row_and_wait(page,
-        page.locator(".commit-row").nth(0),
-        page.locator(".commit-row").nth(3),
+        page.locator(".commit-row").nth(2),
+        page.locator(".commit-row").nth(5),
         "below")
     # Selection should be preserved on the commit we dragged
     selected_msg = page.evaluate("""() => {
         const sel = document.querySelector('.commit-row.selected');
         return sel ? sel.getAttribute('data-message') : null;
     }""")
-    assert selected_msg == msg_at_0
+    assert selected_msg == msg_at_2
 
     # Conflict server tests (new page via goto)
-    page.goto(conflict_server["url"])
+    page.goto(ui_conflict_server["url"])
     page.wait_for_selector(".commit-row")
     initial_count = page.locator(".commit-row").count()
 
@@ -373,3 +367,122 @@ def test_all_ui(page, live_server, drag_server, conflict_server):
     page.locator("#btn-abort").click()
     page.wait_for_selector("#conflict-modal", state="hidden")
     assert page.locator(".commit-row").count() == initial_count
+
+
+@pytest.fixture
+def context_menu_server(tmp_path_factory):
+    yield from _setup_ui_server(tmp_path_factory, "ui-ctx")
+
+
+@pytest.mark.release
+def test_context_menu(page, context_menu_server):
+    page.goto(context_menu_server["url"])
+    page.wait_for_selector(".commit-row")
+
+    # Section 1: Reword via context menu
+    page.locator(".commit-row").nth(0).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    page.locator("#ctx-reword").click()
+    ta = page.locator(".reword-input")
+    ta.wait_for()
+    ta.fill("reworded via context menu")
+    with page.expect_response("**/api/rebase/**"):
+        ta.press("Control+Enter")
+    page.wait_for_function("!document.querySelector('.reword-input')")
+    assert page.locator(".commit-row").nth(0).locator(".message").inner_text() == "reworded via context menu"
+
+    # Section 2: Dismiss by clicking outside
+    page.locator(".commit-row").nth(0).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    page.mouse.click(5, 5)
+    page.wait_for_selector("#context-menu.hidden", state="attached")
+
+    # Section 3: Dismiss by Escape
+    page.locator(".commit-row").nth(0).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#context-menu.hidden", state="attached")
+
+    # Section 4: Create branch via context menu
+    page.locator(".commit-row").nth(1).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    page.locator("#ctx-create-branch").click()
+    page.locator("#prompt-modal-input").fill("test-ctx-branch")
+    with page.expect_response("**/api/branch"):
+        page.locator("#prompt-modal-ok").click()
+    assert page.locator(".commit-row").nth(1).locator("[data-branch='test-ctx-branch']").count() == 1
+
+    # Section 5: Delete branch via context menu on badge
+    page.locator(".commit-row").nth(1).locator("[data-branch='test-ctx-branch']").click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    assert page.locator("#ctx-delete-branch").is_visible()
+    page.locator("#ctx-delete-branch").click()
+    with page.expect_response("**/api/branch"):
+        page.locator("#prompt-modal-ok").click()
+    page.wait_for_function("!document.querySelector('[data-branch=\"test-ctx-branch\"]')")
+
+    # Section 6: Reset via undo stack row context menu — only shows reset, not reword/create-branch
+    head_before = page.locator(".commit-row").nth(0).get_attribute("data-commit-hash")
+    page.locator(".undo-stack-row").nth(1).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    assert page.locator("#ctx-reset").is_visible()
+    assert page.locator("#ctx-reword").is_hidden()
+    assert page.locator("#ctx-create-branch").is_hidden()
+    with page.expect_response("**/api/reset"):
+        page.locator("#ctx-reset").click()
+    page.wait_for_function(f"document.querySelector('.commit-row').getAttribute('data-commit-hash') !== '{head_before}'")
+
+    # Section 7: Dirty tree blocks context menu
+    (context_menu_server["repo"] / "README.md").write_text("modified")
+    page.locator("#btn-refresh").click()
+    page.wait_for_selector("#btn-stash", state="visible")
+    page.locator(".commit-row").nth(0).click(button="right")
+    page.wait_for_timeout(300)
+    assert page.locator("#context-menu").evaluate("el => el.classList.contains('hidden')")
+
+
+@pytest.fixture
+def single_roundtrip_server(tmp_path_factory):
+    yield from _setup_ui_server(tmp_path_factory, "ui-roundtrip")
+
+
+@pytest.mark.release
+def test_mutation_single_round_trip(page, single_roundtrip_server):
+    """A mutation bundles the selected commit's diff into its state response, so
+    it costs exactly one /api/* request — no follow-up GET /api/show. The fixup
+    below selects the merge result (not HEAD), exercising the general case, not
+    just a selection that resolves to HEAD."""
+    page.goto(single_roundtrip_server["url"])
+    page.wait_for_selector(".commit-row")
+    # A plain read does not bundle a diff, so the initial load fetches it via its
+    # own /api/show. Wait for that to render before counting requests, so the
+    # listener below measures only the mutation's round-trips.
+    page.wait_for_selector("#diff-pane:not(.hidden)")
+    count_before = page.locator(".commit-row").count()
+
+    api_urls = []
+    page.on("response", lambda r: "/api/" in r.url and api_urls.append(r.url))
+
+    # Fixup a commit onto its parent — one mutation.
+    row = page.locator(".commit-row").nth(1)
+    row.hover()
+    with page.expect_response("**/api/rebase/**"):
+        row.locator("button[title='Fixup']").click()
+    page.wait_for_function(f"document.querySelectorAll('.commit-row').length === {count_before - 1}")
+    page.wait_for_selector("#spinner", state="hidden")
+
+    assert len(api_urls) == 1, f"expected a single /api/* request, got {api_urls}"
+    assert "/api/rebase/" in api_urls[0]
+
+    # Reset hidden on HEAD, visible on non-HEAD
+    page.locator(".commit-row").nth(0).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    assert page.locator("#ctx-reset").is_hidden()
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#context-menu.hidden", state="attached")
+
+    page.locator(".commit-row").nth(1).click(button="right")
+    page.wait_for_selector("#context-menu:not(.hidden)")
+    assert page.locator("#ctx-reset").is_visible()
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#context-menu.hidden", state="attached")

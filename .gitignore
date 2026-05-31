@@ -5,8 +5,8 @@ __pycache__/
 build/
 dist/
 *.egg-info/
-test-repo/
-test-repo-lib/
+test_repo/
+test_repo-lib/
 .test-repo/
 .test-repo-lib/
 /.vs

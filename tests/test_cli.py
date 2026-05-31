@@ -10,6 +10,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).parent))
+from conftest import _ensure_persistent_test_repo
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -48,15 +51,13 @@ def test_detached_head():
 
 
 def _setup_test_repo_with_history(tmpdir):
-    """Create a test repo with 3 commits and return the repo path."""
+    """Clone a test repo and build reflog entries for undo/redo testing."""
+    test_repo = _ensure_persistent_test_repo()
     repo = Path(tmpdir)
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, capture_output=True, check=True)
-    for i in range(3):
-        (repo / f"f{i}.txt").write_text(f"content {i}")
-        subprocess.run(["git", "add", f"f{i}.txt"], cwd=repo, capture_output=True, check=True)
-        subprocess.run(["git", "commit", "-m", f"commit {i}"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "clone", str(test_repo), str(repo)], capture_output=True, check=True)
+    subprocess.run(["git", "remote", "remove", "origin"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=repo, capture_output=True, check=True)
     return repo
 
 
@@ -95,10 +96,11 @@ def test_redo_one_commit():
         assert head_before_redo != head_after_redo
 
 
+@pytest.mark.release
 def test_undo_too_many():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
-        r = _run_cli(["--undo", "10"], repo)
+        r = _run_cli(["--undo", "100"], repo)
         assert r.returncode != 0
         assert "error:" in r.stderr
 
@@ -115,9 +117,19 @@ def test_undo_redo_are_inverses():
         assert final_head == original_head
 
 
+@pytest.mark.release
 def test_redo_at_tip():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
         r = _run_cli(["--redo"], repo)
         assert r.returncode != 0
         assert "error:" in r.stderr
+
+
+@pytest.mark.release
+def test_undo_and_redo_mutually_exclusive():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _setup_test_repo_with_history(tmpdir)
+        r = _run_cli(["--undo", "--redo"], repo)
+        assert r.returncode != 0
+        assert "error" in r.stderr.lower()

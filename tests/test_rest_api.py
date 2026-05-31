@@ -7,15 +7,17 @@ each endpoint correctly delegates to the GitHistory backend.
 
 The Flask app is expected to live in ``git_history.py`` and expose a
 ``create_app(repo_path, token)`` factory that returns a configured Flask app.
-The app stores a ``GitHistory`` instance on ``app.config["GH"]`` and the auth
-token on ``app.config["TOKEN"]``.
 
 Endpoints under test:
 
     GET  /api/state                -> state JSON
     POST /api/stash                -> state | error JSON
     POST /api/stash/pop            -> state | error JSON
-    POST /api/rebase               -> state | conflict | error JSON
+    POST /api/rebase/move          -> state | conflict | error JSON
+    POST /api/rebase/squash        -> state | conflict | error JSON
+    POST /api/rebase/fixup         -> state | conflict | error JSON
+    POST /api/rebase/reword        -> state | conflict | error JSON
+    POST /api/rebase/split         -> state | conflict | error JSON
     POST /api/rebase/continue      -> state | conflict | error JSON
     POST /api/rebase/abort         -> state | error JSON
     POST /api/reset                -> state | error JSON
@@ -54,26 +56,66 @@ TOKEN = "test-token-abc123"
 class StandardAPITest(unittest.TestCase):
     """Fresh clone of the 21-commit test repo with a Flask test client."""
 
-    def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-api-test-"))
-        self.repo = self.tmpdir / "repo"
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-api-test-"))
+        cls.repo = cls.tmpdir / "repo"
         persistent_repo = _ensure_persistent_test_repo()
-        subprocess.run(["git", "clone", str(persistent_repo), str(self.repo)],
+        subprocess.run(["git", "clone", str(persistent_repo), str(cls.repo)],
                        capture_output=True, check=True)
         # Remove origin remote (clone sets it to persistent repo, but tests expect no remote)
         subprocess.run(["git", "remote", "remove", "origin"],
-                       cwd=str(self.repo), capture_output=True)
+                       cwd=str(cls.repo), capture_output=True)
         # Allow file:// URLs for submodule operations (same as persistent repo)
         subprocess.run(["git", "config", "protocol.file.allow", "always"],
-                       cwd=str(self.repo), capture_output=True)
+                       cwd=str(cls.repo), capture_output=True)
         # Ensure refs/heads/main reflog has at least one entry (not guaranteed after a fresh clone).
-        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(self.repo), capture_output=True)
-        self.app = create_app(str(self.repo), TOKEN)
-        self.app.config["TESTING"] = True
-        self.client = self.app.test_client()
+        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(cls.repo), capture_output=True)
+        # Store initial branch and HEAD for resetting between tests
+        result = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                                cwd=str(cls.repo), capture_output=True, text=True)
+        cls.initial_branch = result.stdout.strip()
+        result = subprocess.run(["git", "rev-parse", "HEAD"],
+                                cwd=str(cls.repo), capture_output=True, text=True)
+        cls.initial_head = result.stdout.strip()
+        cls.app = create_app(str(cls.repo), TOKEN)
+        cls.app.config["TESTING"] = True
+        cls.client = cls.app.test_client()
 
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def setUp(self):
+        # Reset repo to original state before each test (avoid state leakage between tests)
+        subprocess.run(["git", "rebase", "--abort"], cwd=str(self.__class__.repo),
+                       capture_output=True)
+        subprocess.run(["git", "remote", "remove", "origin"], cwd=str(self.__class__.repo),
+                       capture_output=True)
+        subprocess.run(["git", "checkout", self.__class__.initial_branch],
+                       cwd=str(self.__class__.repo), capture_output=True)
+        subprocess.run(["git", "reset", "--hard", self.__class__.initial_head],
+                       cwd=str(self.__class__.repo), capture_output=True, check=True)
+        subprocess.run(["git", "clean", "-fd"], cwd=str(self.__class__.repo),
+                       capture_output=True)
+        # Delete branches created by tests (but keep main and feature)
+        for branch in ["feature/my-feature", "bugfix/issue-123"]:
+            subprocess.run(["git", "branch", "-D", branch], cwd=str(self.__class__.repo),
+                           capture_output=True)
+        # Clear reflog to remove undo stack entries from previous tests
+        branch = self.__class__.initial_branch
+        subprocess.run(["git", "reflog", "expire", "--expire=now",
+                       f"refs/heads/{branch}"], cwd=str(self.__class__.repo),
+                       capture_output=True)
+        # Clean up tmpdir subdirectories created by tests
+        for item in self.__class__.tmpdir.iterdir():
+            if item.name != "repo" and item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+        # Reference class-level resources for compatibility with existing test code
+        self.tmpdir = self.__class__.tmpdir
+        self.repo = self.__class__.repo
+        self.app = self.__class__.app
+        self.client = self.__class__.client
 
     def get(self, url, **kwargs):
         return self.client.get(url, headers={"X-Token": TOKEN}, **kwargs)
@@ -81,6 +123,10 @@ class StandardAPITest(unittest.TestCase):
     def post(self, url, json=None, **kwargs):
         return self.client.post(url, json=json,
                                 headers={"X-Token": TOKEN}, **kwargs)
+
+    def delete(self, url, json=None, **kwargs):
+        return self.client.delete(url, json=json,
+                                  headers={"X-Token": TOKEN}, **kwargs)
 
     def make_dirty(self, path="README.md", content=b"# changed\n"):
         (self.repo / path).write_bytes(content)
@@ -94,6 +140,7 @@ class StandardAPITest(unittest.TestCase):
 # Auth
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class AuthTests(StandardAPITest):
 
     def test_missing_token_returns_403(self):
@@ -113,9 +160,10 @@ class AuthTests(StandardAPITest):
         resp = self.client.post("/api/stash")
         self.assertEqual(resp.status_code, 403)
 
-    def test_api_state_with_token_in_query_string(self):
+    def test_api_state_query_string_token_rejected(self):
+        # Query-string token is not accepted; only the X-Token header authenticates.
         resp = self.client.get(f"/api/state?t={TOKEN}")
-        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.status_code, 403)
 
     def test_auth_not_required_for_root(self):
         # Static files / index don't require auth.  The root route may
@@ -131,11 +179,13 @@ class AuthTests(StandardAPITest):
 
 class StateEndpointTests(StandardAPITest):
 
+    @pytest.mark.release
     def test_returns_json(self):
         resp = self.get("/api/state")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.content_type, "application/json")
 
+    @pytest.mark.release
     def test_state_has_expected_fields(self):
         data = self.get("/api/state").get_json()
         self.assertTrue(data["ok"])
@@ -145,17 +195,18 @@ class StateEndpointTests(StandardAPITest):
         self.assertIn("rebase_in_progress", data)
         self.assertIn("conflict_files", data)
         self.assertIn("commits", data)
-        self.assertIn("branch_history", data)
+        self.assertIn("undo_stack", data)
 
     def test_state_commit_count(self):
         data = self.get("/api/state").get_json()
-        self.assertEqual(len(data["commits"]), len(COMMITS))
+        self.assertEqual(len(data["commits"]), len(COMMITS) + 1)
 
     def test_state_commits_newest_first(self):
         data = self.get("/api/state").get_json()
         self.assertEqual(data["commits"][0]["message"], "Add CI workflow")
         self.assertEqual(data["commits"][-1]["message"], "Initial commit")
 
+    @pytest.mark.release
     def test_head_commit_metadata(self):
         head = self.get("/api/state").get_json()["commits"][0]
         self.assertEqual(head["message"], "Add CI workflow")
@@ -170,17 +221,19 @@ class StateEndpointTests(StandardAPITest):
         self.assertIn("v0.2.0", by_msg["Add user model"]["tags"])
         self.assertIn("v1.0.0", by_msg["Add integration tests"]["tags"])
 
+    @pytest.mark.release
     def test_short_hash_is_seven_char_prefix(self):
         for c in self.get("/api/state").get_json()["commits"]:
             self.assertEqual(len(c["short_hash"]), 7)
             self.assertTrue(c["commit_hash"].startswith(c["short_hash"]))
 
-    def test_branch_history_is_deduped_by_hash(self):
-        hashes = [e["commit_hash"] for e in self.get("/api/state").get_json()["branch_history"]]
+    def test_undo_stack_is_deduped_by_hash(self):
+        hashes = [e["commit_hash"] for e in self.get("/api/state").get_json()["undo_stack"]]
         self.assertEqual(len(hashes), len(set(hashes)))
 
-    def test_branch_history_entries_have_label_and_timestamp(self):
-        for entry in self.get("/api/state").get_json()["branch_history"]:
+    @pytest.mark.release
+    def test_undo_stack_entries_have_label_and_timestamp(self):
+        for entry in self.get("/api/state").get_json()["undo_stack"]:
             self.assertIsNotNone(entry["commit_hash"])
             self.assertIsNotNone(entry["label"])
             self.assertIsNotNone(entry["timestamp"])
@@ -189,12 +242,14 @@ class StateEndpointTests(StandardAPITest):
         self.make_dirty()
         self.assertTrue(self.get("/api/state").get_json()["dirty"])
 
+    @pytest.mark.release
     def test_state_includes_reflog_expiry_field(self):
         data = self.get("/api/state").get_json()
         self.assertIn("reflog_expiry", data)
         self.assertIsInstance(data["reflog_expiry"], str)
         self.assertGreater(len(data["reflog_expiry"]), 0)
 
+    @pytest.mark.release
     def test_state_reflog_expiry_respects_git_config(self):
         # Set a custom reflog expiry
         subprocess.run(["git", "config", "gc.reflogExpireUnreachable", "30 days"],
@@ -264,7 +319,7 @@ class StashPopEndpointTests(StandardAPITest):
 
 
 # ---------------------------------------------------------------------------
-# POST /api/rebase — move
+# POST /api/rebase/move
 # ---------------------------------------------------------------------------
 
 class RebaseMoveEndpointTests(StandardAPITest):
@@ -274,8 +329,8 @@ class RebaseMoveEndpointTests(StandardAPITest):
         commit_hashes = [c["commit_hash"] for c in state["commits"]]
         commit_hashes[0], commit_hashes[1] = commit_hashes[1], commit_hashes[0]
 
-        data = self.post("/api/rebase", json={
-            "operation": "move", "order": commit_hashes,
+        data = self.post("/api/rebase/move", json={
+            "order": commit_hashes,
         }).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["commits"][0]["message"],
@@ -285,8 +340,8 @@ class RebaseMoveEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         commit_hashes = [c["commit_hash"] for c in state["commits"]]
 
-        data = self.post("/api/rebase", json={
-            "operation": "move", "order": commit_hashes,
+        data = self.post("/api/rebase/move", json={
+            "order": commit_hashes,
         }).get_json()
         self.assertTrue(data["ok"])
         new_hashes = [c["commit_hash"] for c in data["commits"]]
@@ -299,7 +354,7 @@ class RebaseMoveEndpointTests(StandardAPITest):
         moved = order.pop(0)
         order.insert(5, moved)
 
-        data = self.post("/api/rebase", json={"operation": "move", "order": order}).get_json()
+        data = self.post("/api/rebase/move", json={ "order": order}).get_json()
         self.assertTrue(data["ok"])
         msgs_after = [c["message"] for c in data["commits"]]
         self.assertEqual(msgs_after[5], msgs_before[0])
@@ -311,7 +366,7 @@ class RebaseMoveEndpointTests(StandardAPITest):
         hashes = [c["commit_hash"] for c in state["commits"]]
         new_order = hashes[:5] + hashes[7:9] + hashes[5:7] + hashes[9:]
 
-        data = self.post("/api/rebase", json={"operation": "move", "order": new_order}).get_json()
+        data = self.post("/api/rebase/move", json={ "order": new_order}).get_json()
         self.assertTrue(data["ok"])
         msgs_after = [c["message"] for c in data["commits"]]
         self.assertGreater(msgs_after.index(msgs_before[5]), 6)
@@ -325,20 +380,20 @@ class RebaseMoveEndpointTests(StandardAPITest):
         commit_hashes = [c["commit_hash"] for c in state["commits"]]
         commit_hashes[0], commit_hashes[1] = commit_hashes[1], commit_hashes[0]
 
-        data = self.post("/api/rebase", json={
-            "operation": "move", "order": commit_hashes,
+        data = self.post("/api/rebase/move", json={
+            "order": commit_hashes,
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "dirty_tree")
 
     @pytest.mark.release
     def test_rebase_uses_post(self):
-        resp = self.get("/api/rebase")
+        resp = self.get("/api/rebase/move")
         self.assertEqual(resp.status_code, 405)
 
 
 # ---------------------------------------------------------------------------
-# POST /api/rebase — squash
+# POST /api/rebase/squash
 # ---------------------------------------------------------------------------
 
 class RebaseSquashEndpointTests(StandardAPITest):
@@ -347,8 +402,8 @@ class RebaseSquashEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         commit_hashes = [state["commits"][0]["commit_hash"], state["commits"][1]["commit_hash"]]
 
-        data = self.post("/api/rebase", json={
-            "operation": "squash", "commit_hashes": commit_hashes,
+        data = self.post("/api/rebase/squash", json={
+            "commit_hashes": commit_hashes,
         }).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(len(data["commits"]), len(state["commits"]) - 1)
@@ -359,15 +414,15 @@ class RebaseSquashEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         commit_hashes = [state["commits"][0]["commit_hash"], state["commits"][1]["commit_hash"]]
 
-        data = self.post("/api/rebase", json={
-            "operation": "squash", "commit_hashes": commit_hashes,
+        data = self.post("/api/rebase/squash", json={
+            "commit_hashes": commit_hashes,
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "dirty_tree")
 
 
 # ---------------------------------------------------------------------------
-# POST /api/rebase — fixup
+# POST /api/rebase/fixup
 # ---------------------------------------------------------------------------
 
 class RebaseFixupEndpointTests(StandardAPITest):
@@ -376,8 +431,8 @@ class RebaseFixupEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         target = state["commits"][3]
 
-        data = self.post("/api/rebase", json={
-            "operation": "fixup", "commit_hashes": [target["commit_hash"]],
+        data = self.post("/api/rebase/fixup", json={
+            "commit_hashes": [target["commit_hash"]],
         }).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(len(data["commits"]), len(state["commits"]) - 1)
@@ -389,8 +444,8 @@ class RebaseFixupEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         root = state["commits"][-1]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "fixup", "commit_hashes": [root],
+        data = self.post("/api/rebase/fixup", json={
+            "commit_hashes": [root],
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "invalid_request")
@@ -399,15 +454,15 @@ class RebaseFixupEndpointTests(StandardAPITest):
     def test_fixup_refused_when_dirty(self):
         self.make_dirty()
         h = self.get("/api/state").get_json()["commits"][3]["commit_hash"]
-        data = self.post("/api/rebase", json={
-            "operation": "fixup", "commit_hashes": [h],
+        data = self.post("/api/rebase/fixup", json={
+            "commit_hashes": [h],
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "dirty_tree")
 
 
 # ---------------------------------------------------------------------------
-# POST /api/rebase — reword
+# POST /api/rebase/reword
 # ---------------------------------------------------------------------------
 
 class RebaseRewordEndpointTests(StandardAPITest):
@@ -416,8 +471,7 @@ class RebaseRewordEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         h = state["commits"][0]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "reword",
+        data = self.post("/api/rebase/reword", json={
             "commit_hashes": [h],
             "new_message": "Brand new message",
         }).get_json()
@@ -429,8 +483,7 @@ class RebaseRewordEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         h = state["commits"][0]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "reword",
+        data = self.post("/api/rebase/reword", json={
             "commit_hashes": [h],
         }).get_json()
         self.assertFalse(data["ok"])
@@ -442,8 +495,7 @@ class RebaseRewordEndpointTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         h = state["commits"][0]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "reword",
+        data = self.post("/api/rebase/reword", json={
             "commit_hashes":[h],
             "new_message": "x",
         }).get_json()
@@ -453,8 +505,8 @@ class RebaseRewordEndpointTests(StandardAPITest):
     def test_reword_middle_commit(self):
         state = self.get("/api/state").get_json()
         h = state["commits"][5]["commit_hash"]
-        data = self.post("/api/rebase", json={
-            "operation": "reword", "commit_hashes": [h], "new_message": "Reworded middle",
+        data = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h], "new_message": "Reworded middle",
         }).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["commits"][5]["message"], "Reworded middle")
@@ -468,11 +520,185 @@ class RebaseRewordEndpointTests(StandardAPITest):
             'First line with "quotes" and \'single quotes\'\n\n'
             'Body with émojis 🎉, ñoñó chars, and C:\\path\\style'
         )
-        data = self.post("/api/rebase", json={
-            "operation": "reword", "commit_hashes": [h], "new_message": new_msg,
+        data = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h], "new_message": new_msg,
         }).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["commits"][0]["message"], new_msg)
+
+
+# ---------------------------------------------------------------------------
+# Bundled diff: a mutation bundles the diff of the commit the UI will select
+# (named by select_index) so the operation is a single round-trip.
+# ---------------------------------------------------------------------------
+
+class BundledDiffTests(StandardAPITest):
+
+    def test_state_read_does_not_bundle_diff(self):
+        # Plain reads carry no diff; it is bundled only for mutations.
+        self.assertIsNone(self.get("/api/state").get_json()["diff"])
+
+    def test_mutation_without_select_index_omits_diff(self):
+        h = self.get("/api/state").get_json()["commits"][0]["commit_hash"]
+        data = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h], "new_message": "No index",
+        }).get_json()
+        self.assertTrue(data["ok"])
+        self.assertIsNone(data["diff"])
+
+    def test_reword_bundles_selected_commit_diff(self):
+        # Reword a commit deep in history; the bundled diff is for that commit
+        # (not HEAD), so the UI renders it without a second /api/show.
+        h = self.get("/api/state").get_json()["commits"][5]["commit_hash"]
+        data = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h], "new_message": "Reworded deep", "select_index": 5,
+        }).get_json()
+        self.assertTrue(data["ok"])
+        selected = data["commits"][5]
+        self.assertNotEqual(selected["commit_hash"], data["commits"][0]["commit_hash"])
+        self.assertEqual(data["diff"]["commit"]["commit_hash"], selected["commit_hash"])
+
+    def test_fixup_bundles_merge_result_diff(self):
+        # The merge result lands at the fixup'd commit's index; its diff is bundled.
+        target = self.get("/api/state").get_json()["commits"][3]
+        data = self.post("/api/rebase/fixup", json={
+            "commit_hashes": [target["commit_hash"]], "select_index": 3,
+        }).get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["diff"]["commit"]["commit_hash"], data["commits"][3]["commit_hash"])
+
+    def test_out_of_range_select_index_omits_diff(self):
+        # Defensive bound: an index past the end bundles nothing rather than erroring.
+        h = self.get("/api/state").get_json()["commits"][0]["commit_hash"]
+        data = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h], "new_message": "Out of range", "select_index": 9999,
+        }).get_json()
+        self.assertTrue(data["ok"])
+        self.assertIsNone(data["diff"])
+
+
+# ---------------------------------------------------------------------------
+# POST /api/rebase/split
+# ---------------------------------------------------------------------------
+
+class SplitEndpointTests(StandardAPITest):
+
+    def _commit(self, files, message, name="Carol Carter", email="carol@example.com"):
+        for relpath, content in files:
+            p = self.repo / relpath
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "add", "--", relpath], cwd=str(self.repo),
+                           check=True, capture_output=True)
+        env = {**os.environ, "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+               "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+        subprocess.run(["git", "commit", "-m", message], cwd=str(self.repo),
+                       check=True, capture_output=True, env=env)
+
+    def _files_of(self, ref):
+        r = subprocess.run(["git", "diff-tree", "--no-commit-id", "-r", "--name-only", ref],
+                           cwd=str(self.repo), capture_output=True, text=True, check=True)
+        return r.stdout.split()
+
+    def test_split_middle_commit(self):
+        # A two-file commit with a newer commit on top of it.
+        self._commit([("alpha.txt", "A\n"), ("beta.txt", "B\n")], "Two files")
+        self._commit([("gamma.txt", "G\n")], "Newer commit", name="Bob Brown", email="bob@example.com")
+        state = self.get("/api/state").get_json()
+        n_before = len(state["commits"])
+        target = state["commits"][1]
+        self.assertEqual(target["message"], "Two files")
+
+        data = self.post("/api/rebase/split", json={
+            "commit_hash": target["commit_hash"], "files_to_split": ["beta.txt"],
+        }).get_json()
+        self.assertTrue(data["ok"])
+        commits = data["commits"]
+        self.assertEqual(len(commits), n_before + 1)
+
+        # The newer commit is replayed unchanged on top.
+        self.assertEqual(commits[0]["message"], "Newer commit")
+        self.assertEqual(self._files_of(commits[0]["commit_hash"]), ["gamma.txt"])
+
+        # The target became two commits: split files newer, kept files older.
+        split_commit, kept_commit = commits[1], commits[2]
+        self.assertEqual([split_commit["message"], kept_commit["message"]], ["Two files", "Two files"])
+        self.assertEqual([split_commit["author"], kept_commit["author"]], ["Carol Carter", "Carol Carter"])
+        self.assertEqual(self._files_of(split_commit["commit_hash"]), ["beta.txt"])
+        self.assertEqual(self._files_of(kept_commit["commit_hash"]), ["alpha.txt"])
+
+        # Everything older than the target is untouched.
+        self.assertEqual([c["message"] for c in commits[3:]],
+                         [c["message"] for c in state["commits"][2:]])
+
+    def test_split_tip_commit(self):
+        self._commit([("alpha.txt", "A\n"), ("beta.txt", "B\n")], "Two files")
+        state = self.get("/api/state").get_json()
+        target = state["commits"][0]
+
+        data = self.post("/api/rebase/split", json={
+            "commit_hash": target["commit_hash"], "files_to_split": ["beta.txt"],
+        }).get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["commits"]), len(state["commits"]) + 1)
+        self.assertEqual(self._files_of(data["commits"][0]["commit_hash"]), ["beta.txt"])
+        self.assertEqual(self._files_of(data["commits"][1]["commit_hash"]), ["alpha.txt"])
+
+    def test_split_non_ascii_filename(self):
+        # git diff-tree C-quotes non-ASCII paths by default; split must handle them
+        self._commit([("ä.txt", "A\n"), ("beta.txt", "B\n")], "Non-ASCII file")
+        state = self.get("/api/state").get_json()
+        target = state["commits"][0]
+        data = self.post("/api/rebase/split", json={
+            "commit_hash": target["commit_hash"], "files_to_split": ["beta.txt"],
+        }).get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["commits"]), len(state["commits"]) + 1)
+
+    @pytest.mark.release
+    def test_split_empty_files_refused(self):
+        self._commit([("alpha.txt", "A\n"), ("beta.txt", "B\n")], "Two files")
+        h = self.get("/api/state").get_json()["commits"][0]["commit_hash"]
+        data = self.post("/api/rebase/split", json={ "commit_hash": h, "files_to_split": []}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "invalid_request")
+
+    @pytest.mark.release
+    def test_split_all_files_refused(self):
+        self._commit([("alpha.txt", "A\n"), ("beta.txt", "B\n")], "Two files")
+        h = self.get("/api/state").get_json()["commits"][0]["commit_hash"]
+        data = self.post("/api/rebase/split", json={
+            "commit_hash": h, "files_to_split": ["alpha.txt", "beta.txt"],
+        }).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "invalid_request")
+
+    @pytest.mark.release
+    def test_split_unknown_file_refused(self):
+        self._commit([("alpha.txt", "A\n"), ("beta.txt", "B\n")], "Two files")
+        h = self.get("/api/state").get_json()["commits"][0]["commit_hash"]
+        data = self.post("/api/rebase/split", json={ "commit_hash": h, "files_to_split": ["nope.txt"]}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "invalid_request")
+
+    @pytest.mark.release
+    def test_split_refused_when_dirty(self):
+        self._commit([("alpha.txt", "A\n"), ("beta.txt", "B\n")], "Two files")
+        h = self.get("/api/state").get_json()["commits"][0]["commit_hash"]
+        self.make_dirty()
+        data = self.post("/api/rebase/split", json={ "commit_hash": h, "files_to_split": ["beta.txt"]}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "dirty_tree")
+
+    @pytest.mark.release
+    def test_split_merge_commit_refused(self):
+        merge = next(c for c in self.get("/api/state").get_json()["commits"]
+                     if c["message"] == "Merge feature work")
+        data = self.post("/api/rebase/split", json={
+            "commit_hash": merge["commit_hash"], "files_to_split": ["feature-work.txt"],
+        }).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "invalid_request")
 
 
 # ---------------------------------------------------------------------------
@@ -482,22 +708,18 @@ class RebaseRewordEndpointTests(StandardAPITest):
 class RebaseInvalidTests(StandardAPITest):
 
     @pytest.mark.release
-    def test_unknown_operation_returns_error(self):
-        data = self.post("/api/rebase", json={
-            "operation": "unknown",
-        }).get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], "invalid_request")
+    def test_unknown_operation_returns_404(self):
+        resp = self.post("/api/rebase/unknown")
+        self.assertEqual(resp.status_code, 404)
 
     @pytest.mark.release
     def test_missing_body_returns_error(self):
-        data = self.post("/api/rebase").get_json()
+        data = self.post("/api/rebase/move").get_json()
         self.assertFalse(data["ok"])
 
     @pytest.mark.release
     def test_rebase_move_with_missing_order_field(self):
-        data = self.post("/api/rebase", json={
-            "operation": "move",
+        data = self.post("/api/rebase/move", json={
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "invalid_request")
@@ -541,6 +763,67 @@ class ResetEndpointTests(StandardAPITest):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/branch
+# ---------------------------------------------------------------------------
+
+class BranchEndpointTests(StandardAPITest):
+
+    def test_create_branch_at_commit(self):
+        state = self.get("/api/state").get_json()
+        target_hash = state["commits"][2]["commit_hash"]
+
+        data = self.post("/api/branch", json={"commit_hash": target_hash, "branch_name": "new-branch"}).get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("new-branch", data["branches"])
+        target = next(c for c in data["commits"] if c["commit_hash"] == target_hash)
+        self.assertIn("new-branch", target["branches"])
+
+    @pytest.mark.release
+    def test_create_branch_uses_post(self):
+        resp = self.get("/api/branch")
+        self.assertEqual(resp.status_code, 405)
+
+    @pytest.mark.release
+    def test_create_branch_with_invalid_commit_hash(self):
+        data = self.post("/api/branch", json={"commit_hash": "deadbeef", "branch_name": "new-branch"}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "invalid_commit")
+
+    def test_delete_branch(self):
+        h = self.get("/api/state").get_json()["commits"][2]["commit_hash"]
+        self.post("/api/branch", json={"commit_hash": h, "branch_name": "feature/my-feature"})
+
+        data = self.delete("/api/branch", json={"branch_name": "feature/my-feature"}).get_json()
+        self.assertTrue(data["ok"])
+        self.assertNotIn("feature/my-feature", data["branches"])
+
+    @pytest.mark.release
+    def test_delete_current_branch_refused(self):
+        data = self.delete("/api/branch", json={"branch_name": self.initial_branch}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "cannot_delete_current_branch")
+
+
+    @pytest.mark.release
+    def test_delete_nonexistent_branch(self):
+        data = self.delete("/api/branch", json={"branch_name": "no-such-branch"}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "git_failed")
+
+    @pytest.mark.release
+    def test_delete_unmerged_branch_refused(self):
+        # A branch with a commit not reachable from HEAD cannot be safely deleted (git branch -d).
+        repo = str(self.repo)
+        subprocess.run(["git", "checkout", "-b", "feature/my-feature"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "unmerged"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", self.initial_branch], cwd=repo, check=True, capture_output=True)
+
+        data = self.delete("/api/branch", json={"branch_name": "feature/my-feature"}).get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "git_failed")
+
+
+# ---------------------------------------------------------------------------
 # GET /api/show
 # ---------------------------------------------------------------------------
 
@@ -576,9 +859,34 @@ class ShowEndpointTests(StandardAPITest):
         self.assertTrue(data["ok"])
         self.assertEqual(data["commit"]["commit_hash"], head["commit_hash"])
 
+    def test_show_returns_files_list(self):
+        # files lists the commit's changed paths (the canonical list split selects from).
+        for name in ("one.txt", "two.txt"):
+            (self.repo / name).write_text(name, encoding="utf-8")
+            subprocess.run(["git", "add", name], cwd=str(self.repo), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Two files"], cwd=str(self.repo), check=True, capture_output=True)
+        head = self.get("/api/state").get_json()["commits"][0]
+        data = self.get(f"/api/show?commit_hash={head['commit_hash']}").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(sorted(data["files"]), ["one.txt", "two.txt"])
+
+    @pytest.mark.release
+    def test_show_rename_displays_rename_but_files_are_canonical(self):
+        # The diff shows a rename, while files stays delete+add (matching split's
+        # diff-tree view) so both name the same paths split validates against.
+        subprocess.run(["git", "config", "diff.renames", "true"], cwd=str(self.repo), check=True, capture_output=True)
+        subprocess.run(["git", "mv", "README.md", "READYOU.md"], cwd=str(self.repo), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Rename readme"], cwd=str(self.repo), check=True, capture_output=True)
+        head = self.get("/api/state").get_json()["commits"][0]
+        data = self.get(f"/api/show?commit_hash={head['commit_hash']}").get_json()
+        self.assertTrue(data["ok"])
+        self.assertIn("rename from README.md", data["diff"])
+        self.assertIn("rename to READYOU.md", data["diff"])
+        self.assertEqual(sorted(data["files"]), ["README.md", "READYOU.md"])
+
 
 # ---------------------------------------------------------------------------
-# Staged changes (index) row
+# (Staged) (index) row
 # ---------------------------------------------------------------------------
 
 class IndexRowTests(StandardAPITest):
@@ -588,84 +896,89 @@ class IndexRowTests(StandardAPITest):
     def test_state_no_index_row_when_clean(self):
         state = self.get("/api/state").get_json()
         hashes = [c["commit_hash"] for c in state["commits"]]
-        self.assertNotIn("index", hashes)
+        self.assertNotIn("(Staged)", hashes)
 
     def test_state_shows_index_row_when_staged(self):
         self.make_staged()
         state = self.get("/api/state").get_json()
-        self.assertEqual(state["commits"][0]["commit_hash"], "index")
+        self.assertEqual(state["commits"][0]["commit_hash"], "(Staged)")
 
     @pytest.mark.release
     def test_index_row_label(self):
         self.make_staged()
         state = self.get("/api/state").get_json()
         index_commit = state["commits"][0]
-        self.assertEqual(index_commit["short_hash"], "index")
+        self.assertEqual(index_commit["short_hash"], "(Staged)")
         self.assertIn("Staged", index_commit["message"])
 
     @pytest.mark.release
     def test_index_row_disappears_after_unstage(self):
         self.make_staged()
         state = self.get("/api/state").get_json()
-        self.assertEqual(state["commits"][0]["commit_hash"], "index")
+        self.assertEqual(state["commits"][0]["commit_hash"], "(Staged)")
         subprocess.run(["git", "restore", "--staged", "README.md"],
                        cwd=str(self.repo), check=True, capture_output=True)
         state2 = self.get("/api/state").get_json()
         hashes = [c["commit_hash"] for c in state2["commits"]]
-        self.assertNotIn("index", hashes)
+        self.assertNotIn("(Staged)", hashes)
 
     def test_show_index_returns_diff(self):
         self.make_staged()
-        data = self.get("/api/show?commit_hash=index").get_json()
+        data = self.get("/api/show?commit_hash=%28Staged%29").get_json()
         self.assertTrue(data["ok"])
         self.assertIn("diff --git", data["diff"])
 
     @pytest.mark.release
     def test_show_index_commit_fields(self):
         self.make_staged()
-        data = self.get("/api/show?commit_hash=index").get_json()
+        data = self.get("/api/show?commit_hash=%28Staged%29").get_json()
         self.assertTrue(data["ok"])
-        self.assertEqual(data["commit"]["commit_hash"], "index")
-        self.assertEqual(data["commit"]["short_hash"], "index")
+        self.assertEqual(data["commit"]["commit_hash"], "(Staged)")
+        self.assertEqual(data["commit"]["short_hash"], "(Staged)")
 
     @pytest.mark.release
     def test_show_index_without_staged_changes_returns_empty_diff(self):
-        data = self.get("/api/show?commit_hash=index").get_json()
+        data = self.get("/api/show?commit_hash=%28Staged%29").get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["diff"], "")
+
+    @pytest.mark.release
+    def test_show_index_has_no_files_list(self):
+        # The (Staged) row carries no files list, so Split stays unavailable there.
+        self.make_staged()
+        data = self.get("/api/show?commit_hash=%28Staged%29").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["files"], [])
 
     def test_rebase_move_ignores_index_hash(self):
         self.make_staged()
         state = self.get("/api/state").get_json()
         # Build order that excludes index; index should not be movable
-        order = [c["commit_hash"] for c in state["commits"] if c["commit_hash"] != "index"]
-        result = self.post("/api/rebase", json={"operation": "move", "order": order}).get_json()
+        order = [c["commit_hash"] for c in state["commits"] if c["commit_hash"] != "(Staged)"]
+        result = self.post("/api/rebase/move", json={ "order": order}).get_json()
         self.assertTrue(result["ok"])
 
     def test_rebase_squash_rejects_index(self):
         self.make_staged()
         state = self.get("/api/state").get_json()
-        real_commits = [c["commit_hash"] for c in state["commits"] if c["commit_hash"] != "index"]
-        result = self.post("/api/rebase", json={
-            "operation": "squash",
-            "commit_hashes": ["index", real_commits[0]],
+        real_commits = [c["commit_hash"] for c in state["commits"] if c["commit_hash"] != "(Staged)"]
+        result = self.post("/api/rebase/squash", json={
+            "commit_hashes": ["(Staged)", real_commits[0]],
         }).get_json()
         self.assertFalse(result["ok"])
 
     def test_rebase_fixup_rejects_index(self):
         self.make_staged()
         state = self.get("/api/state").get_json()
-        real_commits = [c["commit_hash"] for c in state["commits"] if c["commit_hash"] != "index"]
-        result = self.post("/api/rebase", json={
-            "operation": "fixup",
-            "commit_hashes": ["index", real_commits[0]],
+        real_commits = [c["commit_hash"] for c in state["commits"] if c["commit_hash"] != "(Staged)"]
+        result = self.post("/api/rebase/fixup", json={
+            "commit_hashes": ["(Staged)", real_commits[0]],
         }).get_json()
         self.assertFalse(result["ok"])
 
     def test_rebase_reword_rejects_index(self):
-        result = self.post("/api/rebase", json={
-            "operation": "reword",
-            "commit_hashes": ["index"],
+        result = self.post("/api/rebase/reword", json={
+            "commit_hashes": ["(Staged)"],
             "new_message": "new message",
         }).get_json()
         self.assertFalse(result["ok"])
@@ -689,7 +1002,7 @@ class ConflictEndpointTests(StandardAPITest):
                    if c["message"] == "conflict: version B")
         # Swap them (version B should come after version A)
         order[i_a], order[i_b] = order[i_b], order[i_a]
-        return self.post("/api/rebase", json={"operation": "move", "order": order})
+        return self.post("/api/rebase/move", json={ "order": order})
 
     def test_move_produces_conflict(self):
         data = self._swap_order().get_json()
@@ -712,12 +1025,13 @@ class ConflictEndpointTests(StandardAPITest):
         self.assertTrue(data.get("conflict"))
         self.assertTrue(data["rebase_in_progress"])
 
+    @pytest.mark.release
     def test_conflict_response_includes_full_state(self):
         data = self._swap_order().get_json()
         self.assertTrue(data.get("conflict"))
         # Conflict response must carry the full state fields, not just conflict
         # info, so the frontend can refresh uniformly.
-        for field in ("branch", "branches", "commits", "branch_history",
+        for field in ("branch", "branches", "commits", "undo_stack",
                       "dirty", "has_stash", "submodule_update_suggested"):
             self.assertIn(field, data)
         self.assertTrue(data["commits"])
@@ -764,6 +1078,7 @@ class ConflictEndpointTests(StandardAPITest):
 
 class QuitEndpointTests(StandardAPITest):
 
+    @pytest.mark.release
     def test_quit_returns_ok(self):
         with patch("git_history.os._exit"):
             data = self.post("/api/quit").get_json()
@@ -803,8 +1118,7 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
         h0 = state["commits"][0]["commit_hash"]
         h2 = state["commits"][2]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "squash",
+        data = self.post("/api/rebase/squash", json={
             "commit_hashes": [h0, h2],
         }).get_json()
         self.assertFalse(data["ok"])
@@ -816,8 +1130,7 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
         h0 = state["commits"][0]["commit_hash"]
         h2 = state["commits"][2]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "fixup",
+        data = self.post("/api/rebase/fixup", json={
             "commit_hashes": [h0, h2],
         }).get_json()
         self.assertFalse(data["ok"])
@@ -827,14 +1140,14 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
     def test_squash_non_adjacent_does_not_modify_commit_history(self):
         state = self.get("/api/state").get_json()
         hashes_before = [c["commit_hash"] for c in state["commits"]]
-        self.post("/api/rebase", json={"operation": "squash", "commit_hashes": [hashes_before[0], hashes_before[3]]})
+        self.post("/api/rebase/squash", json={ "commit_hashes": [hashes_before[0], hashes_before[3]]})
         hashes_after = [c["commit_hash"] for c in self.get("/api/state").get_json()["commits"]]
         self.assertEqual(hashes_after, hashes_before)
 
     def test_squash_three_adjacent_commits_is_valid(self):
         state = self.get("/api/state").get_json()
         hashes = [state["commits"][i]["commit_hash"] for i in range(3)]
-        data = self.post("/api/rebase", json={"operation": "squash", "commit_hashes": hashes}).get_json()
+        data = self.post("/api/rebase/squash", json={ "commit_hashes": hashes}).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(len(data["commits"]), len(state["commits"]) - 2)
 
@@ -845,8 +1158,7 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
         h0 = state["commits"][0]["commit_hash"]
         h2 = state["commits"][2]["commit_hash"]
 
-        data = self.post("/api/rebase", json={
-            "operation": "squash",
+        data = self.post("/api/rebase/squash", json={
             "commit_hashes": [h0, h2],
         }).get_json()
         self.assertFalse(data["ok"])
@@ -859,7 +1171,7 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
 # POST /api/submodule/update
 # ---------------------------------------------------------------------------
 
-@pytest.mark.release
+@pytest.mark.submodule
 class SubmoduleUpdateEndpointTests(StandardAPITest):
 
     def test_submodule_update_uses_post(self):
@@ -885,7 +1197,7 @@ class SubmoduleUpdateEndpointTests(StandardAPITest):
         i_a = next(i for i, c in enumerate(state["commits"]) if c["message"] == "conflict: version A")
         i_b = next(i for i, c in enumerate(state["commits"]) if c["message"] == "conflict: version B")
         order[i_a], order[i_b] = order[i_b], order[i_a]
-        self.post("/api/rebase", json={"operation": "move", "order": order})
+        self.post("/api/rebase/move", json={ "order": order})
         # Now try submodule_update
         result = self.post("/api/submodule/update").get_json()
         self.assertFalse(result["ok"])
@@ -907,6 +1219,8 @@ class LogEndpointTests(StandardAPITest):
         subprocess.run(["git", "checkout", "-q", "main"], cwd=str(self.repo),
                        capture_output=True, check=True)
         self._log_file = self.tmpdir / "test.log"
+        # Delete log file to start fresh for each test
+        self._log_file.unlink(missing_ok=True)
         self.app = create_app(str(self.repo), TOKEN, log_path=self._log_file)
         self.app.config["TESTING"] = True
         self.client = self.app.test_client()
@@ -944,8 +1258,7 @@ class LogEndpointTests(StandardAPITest):
         self.post("/api/reset", json={"commit_hash":state["commits"][2]["commit_hash"]})
 
         state2 = self.get("/api/state").get_json()
-        self.post("/api/rebase", json={
-            "operation": "reword",
+        self.post("/api/rebase/reword", json={
             "commit_hashes": [state2["commits"][0]["commit_hash"]],
             "new_message": "log test reword",
         })
@@ -989,8 +1302,10 @@ class AuthTokenEdgeCasesTests(StandardAPITest):
 
     @pytest.mark.release
     def test_token_in_query_string_vs_header(self):
-        # Query string token should work
+        # Query string token is rejected; the header authenticates.
         resp = self.client.get(f"/api/state?t={TOKEN}")
+        self.assertEqual(resp.status_code, 403)
+        resp = self.client.get("/api/state", headers={"X-Token": TOKEN})
         self.assertEqual(resp.status_code, 200)
 
     @pytest.mark.release
@@ -1000,18 +1315,12 @@ class AuthTokenEdgeCasesTests(StandardAPITest):
 
     @pytest.mark.release
     def test_malformed_json_with_valid_token(self):
-        resp = self.client.post("/api/rebase",
+        resp = self.client.post("/api/rebase/move",
                                 data="{invalid json}",
                                 headers={"X-Token": TOKEN,
                                         "Content-Type": "application/json"})
         # Should fail on JSON parsing, not auth
         self.assertNotEqual(resp.status_code, 403)
-
-    @pytest.mark.release
-    def test_missing_operation_field_returns_error(self):
-        data = self.post("/api/rebase", json={}).get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], "invalid_request")
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1357,18 @@ class StashConflictScenarioTests(StandardAPITest):
         self.assertTrue(data["ok"])
         self.assertTrue(data["dirty"])
 
+    @pytest.mark.release
+    def test_stash_pop_conflict_returns_stash_conflict(self):
+        self.make_dirty()
+        self.post("/api/stash")
+        # Commit a conflicting change to the same file on HEAD
+        (self.repo / "README.md").write_bytes(b"# conflicting HEAD change\n")
+        subprocess.run(["git", "add", "README.md"], cwd=str(self.repo), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "conflicting change"], cwd=str(self.repo), capture_output=True)
+        data = self.post("/api/stash/pop").get_json()
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["error"], "stash_conflict")
+
 
 # ---------------------------------------------------------------------------
 # HTTP method validation
@@ -1069,7 +1390,7 @@ class HTTPMethodValidationTests(StandardAPITest):
         self.assertEqual(resp.status_code, 405)
 
     def test_rebase_rejects_get(self):
-        resp = self.get("/api/rebase")
+        resp = self.get("/api/rebase/move")
         self.assertEqual(resp.status_code, 405)
 
 
@@ -1089,16 +1410,11 @@ class ErrorResponseStructureTests(StandardAPITest):
         self.assertIn("error", data)
 
     def test_invalid_operation_error_response(self):
-        data = self.post("/api/rebase", json={
-            "operation": "nonexistent"
-        }).get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], "invalid_request")
+        resp = self.post("/api/rebase/nonexistent")
+        self.assertEqual(resp.status_code, 404)
 
     def test_missing_required_field_error_response(self):
-        state = self.get("/api/state").get_json()
-        data = self.post("/api/rebase", json={
-            "operation": "move"
+        data = self.post("/api/rebase/move", json={
             # Missing "order" field
         }).get_json()
         self.assertFalse(data["ok"])
@@ -1106,53 +1422,73 @@ class ErrorResponseStructureTests(StandardAPITest):
 
 
 # ---------------------------------------------------------------------------
-# Branch history labels
+# Undo stack labels
 # ---------------------------------------------------------------------------
 
-class BranchHistoryLabelTests(StandardAPITest):
+class UndoStackLabelTests(StandardAPITest):
 
+    @pytest.mark.release
     def test_reword_produces_reword_entry(self):
         state = self.get("/api/state").get_json()
         h = state["commits"][0]["commit_hash"]
-        data = self.post("/api/rebase", json={
-            "operation": "reword", "commit_hashes": [h], "new_message": "Rewarded top",
+        data = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h], "new_message": "Rewarded top",
         }).get_json()
         self.assertTrue(data["ok"])
-        entries = [e for e in data["branch_history"] if e["label"].startswith("reword:")]
+        entries = [e for e in data["undo_stack"] if e["label"].startswith("reword:")]
         self.assertEqual(len(entries), 1)
         self.assertIn("Rewarded top", entries[0]["label"])
 
+    @pytest.mark.release
     def test_fixup_produces_fixup_entry(self):
         state = self.get("/api/state").get_json()
-        absorbed_msg = state["commits"][0]["message"]
-        data = self.post("/api/rebase", json={
-            "operation": "fixup", "commit_hashes": [state["commits"][0]["commit_hash"]],
+        # fixup folds commits[0] into its parent; the label names the destination.
+        dest_msg = state["commits"][1]["message"]
+        data = self.post("/api/rebase/fixup", json={
+            "commit_hashes": [state["commits"][0]["commit_hash"]],
         }).get_json()
         self.assertTrue(data["ok"])
-        entries = [e for e in data["branch_history"] if e["label"].startswith("fixup:")]
+        entries = [e for e in data["undo_stack"] if e["label"].startswith("fixup:")]
         self.assertEqual(len(entries), 1)
-        self.assertIn(absorbed_msg.split("\n")[0], entries[0]["label"])
+        self.assertIn(dest_msg.split("\n")[0], entries[0]["label"])
 
+    @pytest.mark.release
     def test_move_produces_reorder_entry(self):
         state = self.get("/api/state").get_json()
         order = [c["commit_hash"] for c in state["commits"]]
         order[0], order[1] = order[1], order[0]
-        data = self.post("/api/rebase", json={"operation": "move", "order": order}).get_json()
+        data = self.post("/api/rebase/move", json={ "order": order}).get_json()
         self.assertTrue(data["ok"])
-        entries = [e for e in data["branch_history"] if e["label"].startswith("reorder")]
+        entries = [e for e in data["undo_stack"] if e["label"].startswith("reorder")]
         self.assertEqual(len(entries), 1)
 
+    @pytest.mark.release
     def test_squash_produces_squash_entry(self):
         state = self.get("/api/state").get_json()
-        absorbed_msg = state["commits"][0]["message"]
+        # squash folds into the oldest selected commit; the label names that destination.
+        dest_msg = state["commits"][1]["message"]
         hashes = [state["commits"][0]["commit_hash"], state["commits"][1]["commit_hash"]]
-        data = self.post("/api/rebase", json={"operation": "squash", "commit_hashes": hashes}).get_json()
+        data = self.post("/api/rebase/squash", json={ "commit_hashes": hashes}).get_json()
         self.assertTrue(data["ok"])
-        entries = [e for e in data["branch_history"] if e["label"].startswith("squash:")]
+        entries = [e for e in data["undo_stack"] if e["label"].startswith("squash:")]
         self.assertEqual(len(entries), 1)
-        self.assertIn(absorbed_msg.split("\n")[0], entries[0]["label"])
+        self.assertIn(dest_msg.split("\n")[0], entries[0]["label"])
+
+    @pytest.mark.release
+    def test_squash_three_commits_names_destination_once(self):
+        # All three fold into the oldest selected commit; the label names that
+        # single destination once, not once per folded commit.
+        state = self.get("/api/state").get_json()
+        dest_subject = state["commits"][2]["message"].split("\n")[0]
+        hashes = [state["commits"][i]["commit_hash"] for i in range(3)]
+        data = self.post("/api/rebase/squash", json={ "commit_hashes": hashes}).get_json()
+        self.assertTrue(data["ok"])
+        entries = [e for e in data["undo_stack"] if e["label"].startswith("squash:")]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["label"], "squash: " + dest_subject)
 
 
+    @pytest.mark.release
     def test_mixed_operation_rebase_produces_generic_rebase_label(self):
         """Mixed rebase (reword + fixup) done outside git-history should label as 'rebase'."""
         state = self.get("/api/state").get_json()
@@ -1183,15 +1519,16 @@ class BranchHistoryLabelTests(StandardAPITest):
         self.assertEqual(result.returncode, 0, f"rebase failed: {result.stderr.decode()}")
         # Fetch state and verify the mixed rebase is labeled "rebase"
         state = self.get("/api/state").get_json()
-        entries = [e for e in state["branch_history"] if e["label"] == "rebase"]
+        entries = [e for e in state["undo_stack"] if e["label"] == "rebase"]
         self.assertGreater(len(entries), 0, "Expected a 'rebase' label for mixed operations (reword + fixup)")
 
+    @pytest.mark.release
     def test_reset_produces_reset_label_with_message(self):
         state = self.get("/api/state").get_json()
         target = state["commits"][3]
         data = self.post("/api/reset", json={"commit_hash": target["commit_hash"]}).get_json()
         self.assertTrue(data["ok"])
-        entries = [e for e in data["branch_history"] if e["label"].startswith("reset:")]
+        entries = [e for e in data["undo_stack"] if e["label"].startswith("reset:")]
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["label"], f"reset: {target['message'].split(chr(10))[0]}")
         self.assertNotIn("\n", entries[0]["label"])
@@ -1203,33 +1540,36 @@ class BranchHistoryLabelTests(StandardAPITest):
 
 class SequentialOpsTests(StandardAPITest):
 
+    @pytest.mark.release
     def test_multiple_squash_operations_in_sequence(self):
         state = self.get("/api/state").get_json()
         hashes = [c["commit_hash"] for c in state["commits"]]
-        r1 = self.post("/api/rebase", json={"operation": "squash", "commit_hashes": [hashes[0], hashes[1]]}).get_json()
+        r1 = self.post("/api/rebase/squash", json={ "commit_hashes": [hashes[0], hashes[1]]}).get_json()
         self.assertTrue(r1["ok"])
-        r2 = self.post("/api/rebase", json={"operation": "squash", "commit_hashes": [r1["commits"][0]["commit_hash"], r1["commits"][1]["commit_hash"]]}).get_json()
+        r2 = self.post("/api/rebase/squash", json={ "commit_hashes": [r1["commits"][0]["commit_hash"], r1["commits"][1]["commit_hash"]]}).get_json()
         self.assertTrue(r2["ok"])
         self.assertEqual(len(r2["commits"]), len(r1["commits"]) - 1)
 
+    @pytest.mark.release
     def test_reword_then_move(self):
         state = self.get("/api/state").get_json()
         h0 = state["commits"][0]["commit_hash"]
-        r1 = self.post("/api/rebase", json={"operation": "reword", "commit_hashes": [h0], "new_message": "Reworded"}).get_json()
+        r1 = self.post("/api/rebase/reword", json={ "commit_hashes": [h0], "new_message": "Reworded"}).get_json()
         self.assertTrue(r1["ok"])
         order = [c["commit_hash"] for c in r1["commits"]]
         order[0], order[1] = order[1], order[0]
-        r2 = self.post("/api/rebase", json={"operation": "move", "order": order}).get_json()
+        r2 = self.post("/api/rebase/move", json={ "order": order}).get_json()
         self.assertTrue(r2["ok"])
 
+    @pytest.mark.release
     def test_move_then_squash_then_reset(self):
         state = self.get("/api/state").get_json()
         orig_hashes = [c["commit_hash"] for c in state["commits"]]
         order = orig_hashes[:]
         order[0], order[1] = order[1], order[0]
-        r1 = self.post("/api/rebase", json={"operation": "move", "order": order}).get_json()
+        r1 = self.post("/api/rebase/move", json={ "order": order}).get_json()
         self.assertTrue(r1["ok"])
-        r2 = self.post("/api/rebase", json={"operation": "squash", "commit_hashes": [r1["commits"][0]["commit_hash"], r1["commits"][1]["commit_hash"]]}).get_json()
+        r2 = self.post("/api/rebase/squash", json={ "commit_hashes": [r1["commits"][0]["commit_hash"], r1["commits"][1]["commit_hash"]]}).get_json()
         self.assertTrue(r2["ok"])
         r3 = self.post("/api/reset", json={"commit_hash": orig_hashes[0]}).get_json()
         self.assertTrue(r3["ok"])
@@ -1251,7 +1591,7 @@ class FilenameEdgeCasesTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         order = [c["commit_hash"] for c in state["commits"]]
         order[0], order[1] = order[1], order[0]
-        data = self.post("/api/rebase", json={"operation": "move", "order": order}).get_json()
+        data = self.post("/api/rebase/move", json={ "order": order}).get_json()
         self.assertTrue(data["ok"])
         self.assertEqual(data["commits"][1]["message"], "Add complex filename")
 
@@ -1263,7 +1603,7 @@ class FilenameEdgeCasesTests(StandardAPITest):
 
         state = self.get("/api/state").get_json()
         hashes = [state["commits"][0]["commit_hash"], state["commits"][1]["commit_hash"]]
-        r1 = self.post("/api/rebase", json={"operation": "squash", "commit_hashes": hashes}).get_json()
+        r1 = self.post("/api/rebase/squash", json={ "commit_hashes": hashes}).get_json()
         self.assertTrue(r1["ok"])
         self.assertEqual(len(r1["commits"]), len(state["commits"]) - 1)
         r2 = self.get(f"/api/show?commit_hash={r1['commits'][0]['commit_hash']}").get_json()
@@ -1311,15 +1651,18 @@ class SwitchBranchEndpointTests(StandardAPITest):
 
     def setUp(self):
         super().setUp()
+        # Ensure feature branch points to initial_head (in case previous test moved it)
         subprocess.run(
-            ["git", "branch", "feature"],
+            ["git", "branch", "-f", "feature", self.__class__.initial_head],
             cwd=str(self.repo), check=True, capture_output=True,
         )
 
+    @pytest.mark.release
     def test_state_includes_branches_list(self):
         state = self.get("/api/state").get_json()
         self.assertIn("main", state["branches"])
 
+    @pytest.mark.release
     def test_branches_list_includes_all_local_branches(self):
         state = self.get("/api/state").get_json()
         self.assertIn("feature", state["branches"])
@@ -1329,10 +1672,11 @@ class SwitchBranchEndpointTests(StandardAPITest):
         self.assertTrue(result["ok"])
         self.assertEqual(result["branch"], "feature")
 
+    @pytest.mark.release
     def test_switch_returns_full_state(self):
         result = self.post("/api/switch", json={"branch": "feature"}).get_json()
         self.assertIsNotNone(result["commits"])
-        self.assertIsNotNone(result["branch_history"])
+        self.assertIsNotNone(result["undo_stack"])
         self.assertIsNotNone(result["branches"])
 
     @pytest.mark.release
@@ -1361,7 +1705,7 @@ class SwitchBranchEndpointTests(StandardAPITest):
         i_a = next(i for i, c in enumerate(state["commits"]) if c["message"] == "conflict: version A")
         i_b = next(i for i, c in enumerate(state["commits"]) if c["message"] == "conflict: version B")
         order[i_a], order[i_b] = order[i_b], order[i_a]
-        self.post("/api/rebase", json={"operation": "move", "order": order})
+        self.post("/api/rebase/move", json={ "order": order})
 
     @pytest.mark.release
     def test_switch_during_rebase_is_refused(self):
@@ -1411,14 +1755,84 @@ class SwitchBranchEndpointTests(StandardAPITest):
 
 
 # ---------------------------------------------------------------------------
+# Detached HEAD: mutations refused; only selecting a branch is allowed
+# ---------------------------------------------------------------------------
+
+class DetachedHeadEndpointTests(StandardAPITest):
+
+    def detach(self):
+        # Detach at the current commit, leaving the same commits visible.
+        subprocess.run(["git", "checkout", "--detach", "HEAD"],
+                       cwd=str(self.repo), check=True, capture_output=True)
+
+    def head(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(self.repo),
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    @pytest.mark.release
+    def test_state_reports_empty_branch_when_detached(self):
+        self.detach()
+        state = self.get("/api/state").get_json()
+        self.assertTrue(state["ok"])
+        self.assertEqual(state["branch"], "")
+        self.assertFalse(state["rebase_in_progress"])
+        self.assertTrue(state["commits"])  # commits still listed from detached HEAD
+
+    @pytest.mark.release
+    def test_reset_refused_when_detached(self):
+        state = self.get("/api/state").get_json()
+        target = state["commits"][2]["commit_hash"]
+        self.detach()
+        before = self.head()
+        result = self.post("/api/reset", json={"commit_hash": target}).get_json()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "detached_head")
+        self.assertEqual(self.head(), before)  # repo untouched
+
+    @pytest.mark.release
+    def test_rebase_move_refused_when_detached(self):
+        state = self.get("/api/state").get_json()
+        order = [c["commit_hash"] for c in state["commits"]]
+        order[0], order[1] = order[1], order[0]
+        self.detach()
+        before = self.head()
+        result = self.post("/api/rebase/move", json={ "order": order}).get_json()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "detached_head")
+        self.assertEqual(self.head(), before)
+
+    @pytest.mark.release
+    def test_stash_refused_when_detached(self):
+        self.detach()
+        result = self.post("/api/stash").get_json()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "detached_head")
+
+    @pytest.mark.release
+    def test_submodule_update_refused_when_detached(self):
+        self.detach()
+        result = self.post("/api/submodule/update").get_json()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "detached_head")
+
+    def test_switch_from_detached_attaches_branch(self):
+        self.detach()
+        result = self.post("/api/switch", json={"branch": "main"}).get_json()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["branch"], "main")
+
+
+# ---------------------------------------------------------------------------
 # Pushed status
 # ---------------------------------------------------------------------------
 
+@pytest.mark.release
 class PushedEndpointTests(StandardAPITest):
 
     def _add_remote_and_push(self):
         bare = self.tmpdir / "bare"
-        bare.mkdir()
+        shutil.rmtree(bare, ignore_errors=True)
+        bare.mkdir(exist_ok=True)
         subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
         subprocess.run(["git", "remote", "add", "origin", str(bare)],
                        cwd=str(self.repo), check=True, capture_output=True)
@@ -1475,8 +1889,16 @@ class EmptyRepoEndpointTests(unittest.TestCase):
     def test_empty_repo_read_state_returns_empty_commits(self):
         state = self.get("/api/state").get_json()
         self.assertEqual(len(state["commits"]), 0)
-        self.assertEqual(state["branch_history"], [])
+        self.assertEqual(state["undo_stack"], [])
         self.assertFalse(state["dirty"])
+
+    def test_empty_repo_reports_real_branch_name(self):
+        # The "## No commits yet on <branch>" header must not be misparsed as "No".
+        expected = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"],
+                                   cwd=str(self.repo), capture_output=True, text=True).stdout.strip()
+        state = self.get("/api/state").get_json()
+        self.assertEqual(state["branch"], expected)
+        self.assertNotEqual(state["branch"], "No")
 
     def test_empty_repo_operations_fail_gracefully(self):
         result = self.post("/api/reset", json={"commit_hash": "0" * 40}).get_json()
@@ -1553,8 +1975,7 @@ class LogRobustnessTests(StandardAPITest):
             state = state_resp.get_json()
             h = state["commits"][0]["commit_hash"]
 
-            result = client.post("/api/rebase", json={
-                "operation": "reword",
+            result = client.post("/api/rebase/reword", json={
                 "commit_hashes": [h],
                 "new_message": "Test message"
             }, headers={"X-Token": TOKEN}).get_json()
@@ -1571,8 +1992,7 @@ class LogRobustnessTests(StandardAPITest):
         client = app.test_client()
         state = client.get("/api/state", headers={"X-Token": TOKEN}).get_json()
         h = state["commits"][0]["commit_hash"]
-        client.post("/api/rebase", json={
-            "operation": "reword",
+        client.post("/api/rebase/reword", json={
             "commit_hashes": [h],
             "new_message": "Test"
         }, headers={"X-Token": TOKEN})
@@ -1585,48 +2005,7 @@ class LogRobustnessTests(StandardAPITest):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.release
-class ResetMergeEndpointTests(unittest.TestCase):
-
-    def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-merge-api-"))
-        self.repo = self.tmpdir / "repo"
-        self.repo.mkdir()
-        subprocess.run(["git", "init"], cwd=str(self.repo),
-                       check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test User"],
-                       cwd=str(self.repo), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"],
-                       cwd=str(self.repo), check=True, capture_output=True)
-
-        _commit_raw(self.repo, "file.txt", b"base\n", "base", "alice", 0)
-
-        subprocess.run(["git", "checkout", "-b", "feature"],
-                       cwd=str(self.repo), check=True, capture_output=True)
-        _commit_raw(self.repo, "feature.txt", b"feature\n", "feature work", "bob", 1)
-
-        main_branch = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            cwd=str(self.repo), check=True, capture_output=True, text=True
-        ).stdout.strip()
-        subprocess.run(["git", "checkout", main_branch],
-                       cwd=str(self.repo), check=True, capture_output=True)
-        _commit_raw(self.repo, "main.txt", b"main\n", "main work", "carol", 2)
-
-        subprocess.run(["git", "merge", "feature", "-m", "Merge feature"],
-                       cwd=str(self.repo), check=True, capture_output=True)
-
-        self.app = create_app(str(self.repo), TOKEN)
-        self.app.config["TESTING"] = True
-        self.client = self.app.test_client()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def get(self, url, **kwargs):
-        return self.client.get(url, headers={"X-Token": TOKEN}, **kwargs)
-
-    def post(self, url, json=None, **kwargs):
-        return self.client.post(url, json=json, headers={"X-Token": TOKEN}, **kwargs)
+class ResetMergeEndpointTests(StandardAPITest):
 
     def test_state_shows_merge_commits(self):
         state = self.get("/api/state").get_json()
@@ -1634,11 +2013,45 @@ class ResetMergeEndpointTests(unittest.TestCase):
 
     def test_reset_to_before_merge(self):
         state = self.get("/api/state").get_json()
-        non_merge = next(c for c in state["commits"] if c["message"] != "Merge feature")
+        non_merge = next(c for c in state["commits"] if c["message"] != "Merge feature work")
 
         result = self.post("/api/reset", json={"commit_hash": non_merge["commit_hash"]}).get_json()
         self.assertTrue(result["ok"])
         self.assertEqual(result["commits"][0]["commit_hash"], non_merge["commit_hash"])
+
+
+# ---------------------------------------------------------------------------
+# _list_commits edge cases
+# ---------------------------------------------------------------------------
+
+@pytest.mark.release
+class UnusualCommitMessageTests(StandardAPITest):
+    """Test that _list_commits handles complicated-but-legal commit messages."""
+
+    COMPLICATED_MESSAGE = (
+        'Fix: handle edge\tcase\n\n'
+        'This commit:\n'
+        '\t- has "double" and \'single\' quotes\n'
+        '\t- backslash C:\\path\\to\\file\n'
+        '\t- unicode: café, naïve, 日本語 🎉\n\n'
+        'Fixes #42'
+    )
+
+    def test_state_returns_unusual_message(self):
+        state = self.get("/api/state").get_json()
+        self.assertTrue(state["ok"])
+        self.assertGreater(len(state["commits"]), 0)
+        commit = next((c for c in state["commits"] if c["message"] == self.COMPLICATED_MESSAGE), None)
+        self.assertIsNotNone(commit, "Unusual message commit not found in persistent repo")
+        self.assertEqual(commit["message"], self.COMPLICATED_MESSAGE)
+
+    def test_show_returns_unusual_message(self):
+        state = self.get("/api/state").get_json()
+        commit = next((c for c in state["commits"] if c["message"] == self.COMPLICATED_MESSAGE), None)
+        self.assertIsNotNone(commit, "Unusual message commit not found in persistent repo")
+        data = self.get(f"/api/show?commit_hash={commit['commit_hash']}").get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["commit"]["message"], self.COMPLICATED_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
