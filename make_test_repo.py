@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create a fresh git repo populated with commits suitable for testing git-history.
+Create a fresh git repo populated with commits suitable for testing git-warp.
 
 Also creates a companion library repo (<name>-lib) used as a git submodule.
 
@@ -405,7 +405,7 @@ def _remove(path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create a fresh git repo for testing git-history.")
+        description="Create a fresh git repo for testing git-warp.")
     parser.add_argument(
         "path", nargs="?", default="test-repo",
         help="Directory to create the repo in (default: test-repo)")

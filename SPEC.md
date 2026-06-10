@@ -1,27 +1,6 @@
-# git-history: Specification
+# git-warp: Specification
 
-## Overview
-
-A command-line tool for Windows, run from inside any git repository. It starts a local HTTP server bound to `127.0.0.1`, opens a browser, and presents a single-page UI for rewriting git history. All git operations run server-side via `subprocess`; the browser is pure UI.
-
-Design goal: minimal, reliable code with no avoidable failure modes. Dependencies: Flask, stdlib. No build step or JS bundler.
-
-## Project Structure
-
-```
-git-history/
-├── git_history/
-│   ├── __init__.py      # CLI entry point (main())
-│   ├── __main__.py      # python -m git_history entry point
-│   ├── backend.py       # GitHistory class and dataclasses
-│   ├── rest_api.py      # Flask app factory (create_app)
-│   ├── editor.py        # GIT_SEQUENCE_EDITOR / GIT_EDITOR shim
-│   └── static/
-│       ├── index.html
-│       ├── app.js
-│       ├── style.css
-│       └── manual.html
-```
+See [README.md](README.md) for an overview. 
 
 ## CLI
 
@@ -29,30 +8,31 @@ git-history/
 | Argument | Default   | Meaning |
 |----------|-----------|---------|
 | `--port` | auto | TCP port on `127.0.0.1`. If omitted, picks a free port. |
-| `--clear-log` | — | Delete `~/.git-history.log` and exit. |
-| `--undo [N]` | N=1 | Reset HEAD back N steps in the Undo Stack. No server started. |
-| `--redo [N]` | N=1 | Reset HEAD forward N steps in the Undo Stack. No server started. |
-| `--dark` | off | Enable dark mode in the browser UI. |
+| `--clear-log` | — | Delete `~/.git-warp.log` and exit. |
+| `--undo [N]` | N=1 | Reset HEAD back N steps in the Undo Stack and exit. |
+| `--redo [N]` | N=1 | Reset HEAD forward N steps in the Undo Stack and exit. |
+| `--dark` | off | Force dark mode in the browser UI. |
+| `--ligth` | off | Force light mode in the browser UI. |
 
 ## Startup
 
 1. Validate: git >= 2.26, in a repo, not detached HEAD.
 2. Pick port (auto or `--port N`), generate 32-char token (`secrets.token_urlsafe(24)`).
-3. Start Flask server on `127.0.0.1:<port>` with state starting at `HEAD~500` (or repo root if fewer commits).
-4. Print `git-history running at http://127.0.0.1:<port>/?t=<token>  —  Ctrl+C to quit` and open browser.
+3. Start Flask server on `127.0.0.1:<port>` with state starting at `HEAD~1000` (or repo root if fewer commits).
+4. Print `git-warp running at http://127.0.0.1:<port>/?t=<token>  —  Ctrl+C to quit` and open browser.
 
 ## Shutdown
 
 Two triggers: Ctrl+C in terminal or Quit button (`POST /api/quit`). On Ctrl+C, the server exits normally. On quit, `os._exit(0)` is called after the response.
 
-The server never touches the repo on shutdown. Conflicted rebase state is preserved in `.git/rebase-merge`; restarting git-history picks it up.
+The server never touches the repo on shutdown. Conflicted rebase state is preserved in `.git/rebase-merge`; restarting git-warp picks it up.
 
 ## Security
 
 - Server binds only to `127.0.0.1`.
 - A 32-char random token is generated at startup and embedded in the launch URL as `?t=<token>`.
 - `index.html` and `static/*` are served without token checks (harmless on localhost).
-- `app.js`, on load: reads `t` from `window.location.search`, stores it in `sessionStorage` under `git_history_token`, then calls `history.replaceState(null, '', '/')` to strip the query string from history.
+- `app.js`, on load: reads `t` from `window.location.search`, stores it in `sessionStorage` under `git_warp_token`, then calls `history.replaceState(null, '', '/')` to strip the query string from history.
 - Every `/api/*` request sends the token in the `X-Token` header. Mismatch/missing → HTTP 403 with empty body.
 
 ## Concurrency
@@ -104,7 +84,8 @@ All responses are JSON. Mutations return the state object. Errors return:
 ```json
 {
   "ok": false,
-  "error": "dirty_tree" | "no_stash" | "nothing_to_stash" | "invalid_request" | "git_failed" | "gitmodules_differ" | "gitmodules_in_range" | "invalid_branch" | "rebase_in_progress" | "detached_head" | "invalid_commit" | "not_in_rebase" | "history_changed" | "cannot_delete_current_branch" | "split_failed"
+  "error": "dirty_tree" | "no_stash" | "nothing_to_stash" | "stash_conflict" | "invalid_request" | "git_failed" | "gitmodules_differ" | "gitmodules_in_range" | "invalid_branch" | "rebase_in_progress" | "detached_head" | "invalid_commit" | "not_in_rebase" | "history_changed" | "cannot_delete_current_branch" | "split_failed",
+  "message": "<optional human-readable detail>"
 }
 ```
 
@@ -184,7 +165,7 @@ Toolbar: logo, branch switcher, action buttons. Status banner below (dirty tree,
 
 ## UI Interactions
 
-**Selection:** Click to select (set anchor), Shift-click to extend contiguously. Ctrl/Cmd-click not supported. Escape cancels drag. One commit always selected; HEAD selected after operations. Clicking a row shows its diff.
+**Selection:** Click to select (set anchor), Shift-click to extend contiguously. Ctrl/Cmd-click not supported. Escape cancels drag, or clears selection entirely if not dragging. HEAD is selected as a fallback whenever an operation leaves the selection empty. Clicking a row shows its diff.
 
 **Move (drag):** Mousedown on `⠿` lifts selection with drop-line. Mouseup sends `POST /api/rebase/move` with new hash order. On conflict, opens dialog.
 
@@ -192,13 +173,13 @@ Toolbar: logo, branch switcher, action buttons. Status banner below (dirty tree,
 
 **Fixup:** Row-hover image button (disabled on root). Sends fixup operation.
 
-**Reword:** Right-click commit row → context-menu item "Edit commit message" → inline edit. Enter/blur-with-changes sends reword. Escape/blur-without-changes cancels.
+**Reword:** Right-click commit row → context-menu item "Edit commit message" → inline edit. Ctrl/Cmd+Enter or blur-with-changes sends reword. Escape/blur-without-changes cancels.
 
-**Split:** Select a single commit; the diff pane lists its files. Click files to choose a strict, non-empty subset (Shift-click extends a range). The "Split Commit" button (in the diff pane) sends `POST /api/rebase/split` with `commit_hash` and `files_to_split`. The button is shown only for a single non-staged commit with ≥2 files, and is enabled only while a strict subset is selected. The commit is replaced by two: the unselected files, then the selected files, both reusing its author and message.
+**Split:** Select a single commit; the diff pane lists its files. Click files to choose a strict, non-empty subset (Shift-click extends a range, Ctrl/Cmd-click toggles individual files). The "Split Commit" button (in the diff pane) sends `POST /api/rebase/split` with `commit_hash` and `files_to_split`. The button is shown only for a single non-staged commit with ≥2 files, and is enabled only while a strict subset is selected. The commit is replaced by two: the unselected files, then the selected files, both reusing its author and message.
 
 **Branch switcher:** `<select>` dropdown. Sends `POST /api/switch`. Disabled if dirty or rebase in progress.
 
-**Undo Stack:** Vertical list, newest first. Right-click entry → context-menu item "Reset branch to here" → `POST /api/reset` to that hash. Current HEAD has accent border and badge. Disabled if dirty or rebase in progress.
+**Undo Stack:** Vertical list, newest first. Double-click entry → `POST /api/reset` to that hash. Current HEAD has accent border and badge. Disabled if dirty or rebase in progress.
 
 **Undo/Redo:** Navigate the Undo Stack by one step. Disabled when at oldest/newest or if dirty/rebasing.
 
@@ -216,33 +197,12 @@ Toolbar: logo, branch switcher, action buttons. Status banner below (dirty tree,
 
 **Quit button:** Sends `POST /api/quit` then displays "Server stopped" message.
 
-**Error handling:** Non-conflict errors show dismissible red banner. Dirty-tree errors show persistent yellow banner with Stash button.
+**Error handling:** Non-conflict errors show a red banner, cleared on the next successful operation or refresh. Dirty-tree errors show persistent yellow banner with Stash button.
 
 ## Logging
 
-After every successful mutating operation, append one line to `~/.git-history.log`:
+After every history-rewriting operation, append one line to `~/.git-warp.log`:
 ```
 <iso-timestamp> <branch> <full-hash>
 ```
 Append-only, shared across all repos/branches. Served as plain text via `/log` link (no token required).
-
-## Implementation notes
-
-1. Full hashes internally; short hashes for display only.
-2. Todo/message temp files: UTF-8, `newline="\n"` (git rejects CRLF on Windows).
-3. Editor env-vars: use `shlex.quote` for paths (git's bundled bash parses correctly).
-4. Temp files: created via `tempfile.mkstemp`, deleted in `finally` block.
-5. Dirty-tree check: `git status --porcelain --untracked-files=no`; non-empty = dirty.
-6. Conflict file list: `git diff --name-only --diff-filter=U` when `.git/rebase-merge` exists.
-7. Token auth: `X-Token` mismatch → HTTP 403, empty body.
-8. Detached HEAD: rejected at startup via `git symbolic-ref --quiet HEAD`.
-9. Git log format: `--format=%H%x1f%h%x1f%an%x1f%ai%x1f%B%x1f%D%x00` (unit-sep, null-terminated). `%B` for full message (reword round-trips). `%ai` ISO 8601; UI shows first 10 chars.
-10. Multiple instances: each gets own port/token; `.git/index.lock` prevents corruption.
-
-## Installation
-
-```
-pip install git+https://github.com/BjarneH/git-history
-```
-
-Then run `git-history` from any git repository.

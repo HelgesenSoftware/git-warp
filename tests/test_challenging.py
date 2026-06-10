@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from make_test_repo import AUTHORS, BASE_DATE, init_repo
 from conftest import _commit_raw, _ensure_persistent_test_repo
-from git_history.backend import GitHistory, GitHistoryError, GitError
+from git_warp.backend import GitWarp, GitWarpError, GitError
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +148,12 @@ def _build_binary_and_rename_repo(parent: Path) -> Path:
 class ChallengeBase(unittest.TestCase):
 
     def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-challenge-"))
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-warp-challenge-"))
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def assert_recoverable(self, gh: GitHistory):
+    def assert_recoverable(self, gh: GitWarp):
         """Abort any in-progress rebase and verify the repo is clean afterward."""
         state = gh.read_state()
         if state.rebase_in_progress:
@@ -204,7 +204,7 @@ class MergeCommitTests(ChallengeBase):
         # Remove origin remote
         subprocess.run(["git", "remote", "remove", "origin"],
                        cwd=str(self.repo), capture_output=True)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _merge_and_non_merge_hashes(self):
         state = self.gh.read_state()
@@ -241,7 +241,7 @@ class MergeCommitTests(ChallengeBase):
             result = self.gh.squash([non_merge[0], non_merge[1]])
             state = self.gh.read_state()
             self.assert_valid_state(state)
-        except (GitError, GitHistoryError):
+        except (GitError, GitWarpError):
             self.assert_recoverable(self.gh)
 
     def test_fixup_of_non_merge_commit_adjacent_to_merge_leaves_repo_recoverable(self):
@@ -292,7 +292,7 @@ class MergeCommitTests(ChallengeBase):
 
         try:
             self.gh.squash([non_merge[0], non_merge[1]])        # Whether op succeeded or failed, read_state must work.
-        except (GitError, GitHistoryError):
+        except (GitError, GitWarpError):
             pass
         if self.gh.read_state().rebase_in_progress:
             self.gh.rebase_abort()
@@ -313,7 +313,7 @@ class BinaryAndRenameTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo = _build_binary_and_rename_repo(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_squash_two_binary_commits_succeeds(self):
         """Squash 'add binary' + 'update binary' — data.bin must have v2 content."""
@@ -408,7 +408,7 @@ class CreateDeleteFileTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo = _setup_create_delete_repo(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_squash_create_and_delete_produces_commit_without_temp_file(self):
         """Squash 'add temp' + 'delete temp': the combined commit must not contain temp.txt."""
@@ -456,7 +456,7 @@ class CreateDeleteFileTests(ChallengeBase):
         try:
             result = self.gh.squash([h_add, h_above])
             self.assert_valid_state(result)
-        except (GitError, GitHistoryError):
+        except (GitError, GitWarpError):
             self.assert_recoverable(self.gh)
 
 
@@ -476,7 +476,7 @@ class EmptyCommitTests(ChallengeBase):
         _commit_raw(self.repo, "a.txt", b"v1\n", "real A",  "bob",   1)
         _commit_empty(self.repo, "empty B", "carol", 2)
         _commit_raw(self.repo, "a.txt", b"v2\n", "real C",  "alice", 3)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_fixup_empty_commit_into_real_predecessor(self):
         """Fixup the empty commit: it folds into 'real A' and vanishes."""
@@ -551,7 +551,7 @@ class UndoRedoTests(ChallengeBase):
                        capture_output=True, check=True)
         subprocess.run(["git", "remote", "remove", "origin"],
                        cwd=str(self.repo), capture_output=True)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_undo_squash_via_reset_to_pre_squash_head(self):
         """After squash, resetting to pre-squash HEAD restores original commit count."""
@@ -668,7 +668,7 @@ class SequentialOperationsTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo = _setup_create_delete_repo(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_squash_then_reword_then_squash(self):
         """Three sequential operations must each succeed and leave valid state."""
@@ -801,7 +801,7 @@ class UnicodeAndSpecialCharTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo = _setup_unicode_repo(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_read_state_returns_unicode_messages(self):
         """read_state must correctly return unicode commit messages including emoji and CJK."""
@@ -891,7 +891,7 @@ class ConflictingContentTests(ChallengeBase):
         # Remove origin remote
         subprocess.run(["git", "remote", "remove", "origin"],
                        cwd=str(self.repo), capture_output=True)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_move_conflicting_commits_leaves_repo_recoverable(self):
         """
@@ -974,7 +974,7 @@ class MultiConflictContinueTests(ChallengeBase):
         _commit_raw(self.repo, "conflict_x.txt", b"0\n", "x base",   "alice", 1)
         _commit_raw(self.repo, "conflict_x.txt", b"1\n", "x to one", "bob",   2)
         _commit_raw(self.repo, "conflict_x.txt", b"2\n", "x to two", "carol", 3)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _resolve(self, content: bytes):
         (self.repo / "conflict_x.txt").write_bytes(content)
@@ -1037,7 +1037,7 @@ class TaggedCommitTests(ChallengeBase):
                        capture_output=True, check=True)
         subprocess.run(["git", "remote", "remove", "origin"],
                        cwd=str(self.repo), capture_output=True)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_read_state_with_tagged_commits_succeeds(self):
         """read_state must work normally even when commits carry annotated and lightweight tags."""
@@ -1120,7 +1120,7 @@ class MultilineMessageTests(ChallengeBase):
                        capture_output=True, check=True)
         subprocess.run(["git", "remote", "remove", "origin"],
                        cwd=str(self.repo), capture_output=True)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _multiline_commit(self, state):
         c = next((c for c in state.commits if c.message == MULTILINE_COMMIT_MESSAGE), None)
@@ -1208,7 +1208,7 @@ class SpacesInFilenamesTests(ChallengeBase):
         subprocess.run(["git", "commit", "-m", "Add files with spaces"],
                        cwd=str(self.repo), env=env1, capture_output=True, check=True)
         _commit_raw(self.repo, "my document.txt", b"final\n", "Update docs", "alice", 1001)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_show_commit_with_spaced_filename_includes_filename_in_diff(self):
         """show() must include the space-containing filename in its diff output."""
@@ -1287,7 +1287,7 @@ class NearRootEdgeCaseTests(ChallengeBase):
     def _reset_to(self, tag):
         subprocess.run(["git", "reset", "--hard", tag],
                        cwd=str(self.repo), check=True, capture_output=True)
-        return GitHistory(str(self.repo))
+        return GitWarp(str(self.repo))
 
     def test_read_state_single_commit_repo(self):
         """read_state on a one-commit repo must return exactly one commit."""
@@ -1363,7 +1363,7 @@ class NearRootEdgeCaseTests(ChallengeBase):
         try:
             result = gh.squash([h])
             self.assert_valid_state(result)
-        except GitHistoryError:
+        except GitWarpError:
             self.assert_recoverable(gh)
 
 
@@ -1386,7 +1386,7 @@ class EmptyReflogTests(ChallengeBase):
                        cwd=str(self.repo), check=True, capture_output=True)
         # Drop every reflog entry so `git reflog refs/heads/main` returns empty.
         _git(self.repo, "git", "reflog", "expire", "--expire=all", "--all")
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def test_empty_reflog_yields_empty_undo_stack(self):
         """An emptied reflog produces an empty undo stack with no crash."""
@@ -1401,11 +1401,11 @@ class EmptyReflogTests(ChallengeBase):
 
     def test_describe_rebase_group_handles_empty_group(self):
         """The pure group classifier defaults to 'rebase' on no entries."""
-        self.assertEqual(GitHistory._describe_rebase_group([]), "rebase")
+        self.assertEqual(GitWarp._describe_rebase_group([]), "rebase")
 
     def test_filter_rebase_groups_handles_empty_input(self):
         """The pure rebase-group filter returns [] on no entries."""
-        self.assertEqual(GitHistory._filter_rebase_groups([]), [])
+        self.assertEqual(GitWarp._filter_rebase_groups([]), [])
 
 
 if __name__ == "__main__":

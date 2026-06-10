@@ -16,14 +16,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from git_history.rest_api import create_app
+from git_warp.rest_api import create_app
 from conftest import _ensure_persistent_test_repo
 
 TOKEN = "test-ui-token-abcdefgh12345678"
 
 
 def _setup_ui_server(tmp_path_factory, prefix):
-    """Set up a live git-history server for UI testing."""
+    """Set up a live git-warp server for UI testing."""
     work = tmp_path_factory.mktemp(prefix)
     repo = work / "repo"
     template = _ensure_persistent_test_repo()
@@ -61,7 +61,7 @@ def ui_conflict_server(tmp_path_factory):
 
 
 def _row(page, message):
-    return page.locator(f'.commit-row[data-message="{message}"]')
+    return page.locator(".commit-row").filter(has=page.locator(".message", has_text=message))
 
 
 def drag_row(page, source_locator, target_locator, position="above"):
@@ -161,7 +161,7 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
     page.wait_for_function("!document.querySelector('.reword-input')")
     assert page.locator(".commit-row").nth(0).locator(".message").inner_text() == "reworded message"
 
-    # Section 5: Undo stack group consecutive rebases
+    # Section 5: additional rewords
     for msg in ["first reword", "second reword"]:
         page.locator(".commit-row").nth(0).click(button="right")
         page.wait_for_selector("#context-menu:not(.hidden)")
@@ -304,7 +304,7 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
         _row(page, "Add deployment config"),
         _row(page, "Add error pages"),
         "above")
-    all_messages = [r.get_attribute("data-message")
+    all_messages = [r.locator(".message").inner_text()
                     for r in page.locator(".commit-row").all()]
     reordered = [m for m in all_messages
                  if m in {"Add error pages", "Add deployment config", "Add admin panel"}]
@@ -316,7 +316,7 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
 
     # Section 16: Drag group of selected commits
     page.wait_for_timeout(200)
-    msgs_before = [r.get_attribute("data-message")
+    msgs_before = [r.locator(".message").inner_text()
                    for r in page.locator(".commit-row").all()]
     msg5_before = msgs_before[5]
     msg6_before = msgs_before[6]
@@ -329,7 +329,7 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
         page.locator(".commit-row").nth(8),
         "below")
 
-    msgs_after = [r.get_attribute("data-message")
+    msgs_after = [r.locator(".message").inner_text()
                   for r in page.locator(".commit-row").all()]
 
     assert msgs_after.index(msg5_before) > 6
@@ -340,7 +340,7 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
     page.wait_for_timeout(500)
     # Select commit at index 2 before dragging (selection preservation works on selected commits)
     page.locator(".commit-row").nth(2).click()
-    msg_at_2 = page.locator(".commit-row").nth(2).get_attribute("data-message")
+    msg_at_2 = page.locator(".commit-row").nth(2).locator(".message").inner_text()
     page.wait_for_timeout(100)
     drag_row_and_wait(page,
         page.locator(".commit-row").nth(2),
@@ -349,7 +349,7 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
     # Selection should be preserved on the commit we dragged
     selected_msg = page.evaluate("""() => {
         const sel = document.querySelector('.commit-row.selected');
-        return sel ? sel.getAttribute('data-message') : null;
+        return sel ? sel.querySelector('.message').textContent : null;
     }""")
     assert selected_msg == msg_at_2
 
@@ -421,15 +421,30 @@ def test_context_menu(page, context_menu_server):
         page.locator("#prompt-modal-ok").click()
     page.wait_for_function("!document.querySelector('[data-branch=\"test-ctx-branch\"]')")
 
-    # Section 6: Reset via undo stack row context menu — only shows reset, not reword/create-branch
+    # Section 6: The Undo Stack has no context menu. It highlights the current
+    # position, navigates with the undo/redo arrows, and resets to a commit by double-click.
     head_before = page.locator(".commit-row").nth(0).get_attribute("data-commit-hash")
+
+    # The current position (HEAD) is highlighted at the top of the stack.
+    assert page.locator(".undo-stack-row.is-head").count() == 1
+    assert "is-head" in page.locator(".undo-stack-row").nth(0).get_attribute("class")
+
+    # Right-clicking the stack never opens a context menu.
     page.locator(".undo-stack-row").nth(1).click(button="right")
-    page.wait_for_selector("#context-menu:not(.hidden)")
-    assert page.locator("#ctx-reset").is_visible()
-    assert page.locator("#ctx-reword").is_hidden()
-    assert page.locator("#ctx-create-branch").is_hidden()
+    page.wait_for_timeout(300)
+    assert page.locator("#context-menu").evaluate("el => el.classList.contains('hidden')")
+
+    # The undo arrow moves the position down to the commit below HEAD; redo moves it back.
     with page.expect_response("**/api/reset"):
-        page.locator("#ctx-reset").click()
+        page.locator("#btn-undo").click()
+    page.wait_for_function(f"document.querySelector('.commit-row').getAttribute('data-commit-hash') !== '{head_before}'")
+    with page.expect_response("**/api/reset"):
+        page.locator("#btn-redo").click()
+    page.wait_for_function(f"document.querySelector('.commit-row').getAttribute('data-commit-hash') === '{head_before}'")
+
+    # Double-clicking a non-HEAD row resets the branch to that commit.
+    with page.expect_response("**/api/reset"):
+        page.locator(".undo-stack-row").nth(1).dblclick()
     page.wait_for_function(f"document.querySelector('.commit-row').getAttribute('data-commit-hash') !== '{head_before}'")
 
     # Section 7: Dirty tree blocks context menu
@@ -458,6 +473,10 @@ def test_mutation_single_round_trip(page, single_roundtrip_server):
     # own /api/show. Wait for that to render before counting requests, so the
     # listener below measures only the mutation's round-trips.
     page.wait_for_selector("#diff-pane:not(.hidden)")
+    # The selector resolves on a MutationObserver notification, which races the
+    # initial /api/show response event over the CDP socket; wait for networkidle
+    # so that event is flushed before the counting listener attaches below.
+    page.wait_for_load_state("networkidle")
     count_before = page.locator(".commit-row").count()
 
     api_urls = []

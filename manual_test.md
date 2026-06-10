@@ -6,15 +6,15 @@ Run these checks before each release.
 
 ## 1. CLI startup
 
-Use the test repo created by `python make_test_repo.py test-repo` (run from the git-history folder).
+Use the test repo created by `python make_test_repo.py test-repo` (run from the git-warp folder).
 
 | # | Step | Expected |
 |---|------|----------|
-| 1 | `cd test-repo` then `python ..\git_history.py` | Browser opens at `http://127.0.0.1:<port>/` with `?t=<token>` in the URL |
+| 1 | `cd test-repo` then `python ..\git_warp.py` | Browser opens at `http://127.0.0.1:<port>/` with `?t=<token>` in the URL |
 | 2 | Wait for page to load, then inspect the address bar | Token is gone — URL is just `/` |
 | 3 | Reload the page (no `?t=` in URL) | App still works (token persisted in localStorage) |
-| 4 | `python ..\git_history.py --port 9876` | Server binds to port 9876 |
-| 5 | `python ..\git_history.py HEAD~5` | Only 5 commits visible |
+| 4 | `python ..\git_warp.py --port 9876` | Server binds to port 9876 |
+| 5 | `python ..\git_warp.py HEAD~5` | Only 5 commits visible |
 
 ---
 
@@ -62,6 +62,6 @@ Drag-and-drop and conflict abort are covered by automated tests.
 
 | # | Step | Expected |
 |---|------|----------|
-| 1 | `python git_history.py --clear-log` (after some operations have been logged) | Prints `Deleted <log path>` and exits |
-| 2 | `python git_history.py --clear-log` (no log file present) | Prints `No log file at <log path>` and exits |
+| 1 | `python git_warp.py --clear-log` (after some operations have been logged) | Prints `Deleted <log path>` and exits |
+| 2 | `python git_warp.py --clear-log` (no log file present) | Prints `No log file at <log path>` and exits |
 

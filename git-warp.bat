@@ -1,4 +1,4 @@
 @echo off
 setlocal
 set PYTHONPATH=%~dp0;%PYTHONPATH%
-python -m git_history %*
+python -m git_warp %*

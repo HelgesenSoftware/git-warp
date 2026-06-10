@@ -1,7 +1,7 @@
 """
 Unit tests for git worktree support.
 
-Tests the GitHistory class when used with git worktrees (created via `git worktree add`).
+Tests the GitWarp class when used with git worktrees (created via `git worktree add`).
 This exposes bugs in the backend's handling of worktree-specific file structure.
 
 In a worktree:
@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from conftest import _ensure_persistent_test_repo
-from git_history.backend import GitHistory, GitError, GitHistoryError
+from git_warp.backend import GitWarp, GitError, GitWarpError
 
 
 class WorktreeTest(unittest.TestCase):
@@ -35,7 +35,7 @@ class WorktreeTest(unittest.TestCase):
 
     def setUp(self):
         """Create a main repo and a worktree."""
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-worktree-"))
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-warp-worktree-"))
         self.main_repo = self.tmpdir / "main"
         self.worktree_path = self.tmpdir / "worktree"
 
@@ -72,7 +72,7 @@ class WorktreeTest(unittest.TestCase):
             capture_output=True,
         )
 
-        self.gh = GitHistory(str(self.worktree_path))
+        self.gh = GitWarp(str(self.worktree_path))
 
     def tearDown(self):
         """Clean up worktree and temp dirs."""
@@ -242,7 +242,7 @@ class WorktreeOperationTests(WorktreeTest):
             try:
                 result = self.gh.move(hashes)
                 self.assertTrue(result.ok)
-            except (GitError, GitHistoryError):
+            except (GitError, GitWarpError):
                 # Operation failed, but should not crash
                 pass
 

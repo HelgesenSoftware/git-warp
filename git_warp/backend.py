@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 
-class HistoryStateError(Exception):
+class WarpStateError(Exception):
     """Raised when history state cannot be determined."""
     pass
 
@@ -19,18 +19,33 @@ class GitError(Exception):
     pass
 
 
-class GitHistoryError(GitError):
-    """Raised by GitHistory methods for validation or git operation failures."""
+class InvalidCommit(GitError):
+    """Raised when a commit reference cannot be resolved."""
+    pass
+
+
+class GitWarpError(GitError):
+    """Raised by GitWarp methods for validation or git operation failures."""
     def __init__(self, code, message=""):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}" if message else code)
 
 
-_LOG_PATH = Path.home() / ".git-history.log"
+_LOG_PATH = Path.home() / ".git-warp.log"
 
-# Limit visible commits to this many to avoid overwhelming the UI and slow performance on large repos.
-_HISTORY_DEPTH = 500
+
+def clear_log():
+    """Delete the log file if it exists. Returns its path and whether it was deleted."""
+    existed = _LOG_PATH.exists()
+    if existed:
+        _LOG_PATH.unlink()
+    return _LOG_PATH, existed
+
+# Limit visible commits to roughly this many (first-parent depth) to avoid overwhelming
+# the UI and slow performance on large repos. On merge-heavy repos, _start..HEAD can
+# include additional commits reachable via merged branches, so this is not a hard cap.
+_HISTORY_DEPTH = 1000
 
 _MAX_DIFF_CHARS = 100_000
 
@@ -112,8 +127,19 @@ class ErrorResponse:
 
 
 @dataclass
+class ShowCommit:
+    # Only content-addressed fields; ref-dependent branches/tags are excluded so
+    # the hash-keyed show cache stays immutable and never serves stale refs.
+    commit_hash: str
+    short_hash: str
+    message: str
+    author: str
+    date: str
+
+
+@dataclass
 class ShowResponse:
-    commit: Commit
+    commit: ShowCommit
     diff: str
     files: list = field(default_factory=list)
     ok: bool = True
@@ -133,7 +159,7 @@ class Git:
     methods that return plain Python values. Most queries degrade to a safe
     default on failure; the few whose failure must reach the user return
     (value, error). Mutating methods return None on success or raise GitError
-    on failure. Knows nothing of git-history's domain — the commit
+    on failure. Knows nothing of git-warp's domain — the commit
     window, the state model, or the operation log.
 
     Cache invariant: per-commit-hash caches use full 40-char hashes (immutable
@@ -148,7 +174,7 @@ class Git:
         self._commit_touches_gitmodules_cache = {}
         r = self._run(["git", "rev-parse", "--git-dir"])
         if r.returncode != 0:
-            raise HistoryStateError("not a git repository")
+            raise WarpStateError("not a git repository")
         p = Path(r.stdout.strip())
         self._git_dir = p if p.is_absolute() else (self.repo / p).resolve()
 
@@ -162,10 +188,10 @@ class Git:
             capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
         )
 
-    @staticmethod
-    def _err(r):
-        """None if the command succeeded, otherwise its stderr (stripped)."""
-        return None if r.returncode == 0 else r.stderr.strip()
+    def _mutate(self, *args, env=None):
+        r = self._run(list(args), env=env)
+        if r.returncode != 0:
+            raise GitError(r.stderr.strip())
 
     def _rebase_env(self, todo_path=None, msg_path=None):
         env = os.environ.copy()
@@ -176,9 +202,9 @@ class Git:
         env["GIT_EDITOR"] = editor_cmd
         env["GIT_TERMINAL_PROMPT"] = "0"
         if todo_path:
-            env["GIT_HISTORY_TODO"] = todo_path
+            env["GIT_WARP_TODO"] = todo_path
         if msg_path:
-            env["GIT_HISTORY_MSG"] = msg_path
+            env["GIT_WARP_MSG"] = msg_path
         return env
 
     # ------------------------------------------------------------------
@@ -191,7 +217,7 @@ class Git:
 
     def resolve_commit(self, ref):
         if ref is None:
-            raise GitError("cannot resolve None")
+            raise InvalidCommit("cannot resolve None")
         if ref in self._resolve_cache:
             return self._resolve_cache[ref]
         r = self._run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"])
@@ -200,7 +226,7 @@ class Git:
             if len(ref) == 40:  # only cache full hashes — symbolic refs (HEAD, ORIG_HEAD, base^, …) change across mutations
                 self._resolve_cache[ref] = result
             return result
-        raise GitError(f"cannot resolve commit: {ref}")
+        raise InvalidCommit(f"cannot resolve commit: {ref}")
 
     def is_ancestor(self, ancestor, descendant):
         return self._run(["git", "merge-base", "--is-ancestor", ancestor, descendant]).returncode == 0
@@ -306,13 +332,13 @@ class Git:
 
     def commit_record(self, commit_hash):
         """Return (record, None) where record is (hash, short_hash, author, date,
-        body, refs), or (None, stderr) on failure."""
-        fmt = "%H%x00%h%x00%an%x00%ai%x00%B%x00%D"
+        body), or (None, stderr) on failure."""
+        fmt = "%H%x00%h%x00%an%x00%ai%x00%B"
         r = self._run(["git", "log", "--abbrev=7", f"--format={fmt}", "-1", commit_hash])
         if r.returncode != 0:
             return None, r.stderr.strip()
         parts = r.stdout.split("\x00")
-        return (tuple(parts[:6]), None) if len(parts) >= 6 else (None, "")
+        return (tuple(parts[:5]), None) if len(parts) >= 5 else (None, "")
 
     def commit_diff(self, commit_hash):
         r = self._run(["git", "show", "--format=", commit_hash])
@@ -389,7 +415,7 @@ class Git:
     def commit_touches_gitmodules(self, commit_hash):
         if commit_hash in self._commit_touches_gitmodules_cache:
             return self._commit_touches_gitmodules_cache[commit_hash]
-        r = self._run(["git", "diff-tree", "--no-commit-id", "-r", "--name-only", commit_hash])
+        r = self._run(["git", "diff-tree", "--root", "--no-commit-id", "-r", "--name-only", commit_hash])
         result = ".gitmodules" in r.stdout.splitlines()
         self._commit_touches_gitmodules_cache[commit_hash] = result
         return result
@@ -410,39 +436,26 @@ class Git:
     # ------------------------------------------------------------------
 
     def create_branch(self, branch_name, commit_hash):
-        r = self._run(["git", "branch", branch_name, commit_hash])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        # "--" stops a branch name beginning with "-" being parsed as an option.
+        self._mutate("git", "branch", "--", branch_name, commit_hash)
 
     def delete_branch(self, branch_name):
-        r = self._run(["git", "branch", "-d", branch_name])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "branch", "-d", "--", branch_name)
 
     def stash_push(self):
-        r = self._run(["git", "stash", "push"])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "stash", "push")
 
     def stash_pop(self):
-        r = self._run(["git", "stash", "pop"])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "stash", "pop")
 
     def reset_hard(self, commit_hash):
-        r = self._run(["git", "reset", "--hard", commit_hash])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "reset", "--hard", commit_hash)
 
     def switch(self, branch):
-        r = self._run(["git", "switch", branch])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "switch", branch)
 
     def submodule_update_init(self):
-        r = self._run(["git", "submodule", "update", "--init"])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "submodule", "update", "--init")
 
     def rebase_interactive(self, todo_lines, base, msg_path=None):
         """Run `git rebase -i` against a pre-written todo (base=None means
@@ -462,21 +475,17 @@ class Git:
             _unlink_safe(todo_path)
 
     def rebase_continue(self):
-        r = self._run(["git", "rebase", "--continue"], env=self._rebase_env())
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "rebase", "--continue", env=self._rebase_env())
 
     def rebase_abort(self):
-        r = self._run(["git", "rebase", "--abort"])
-        if r.returncode != 0:
-            raise GitError(r.stderr.strip())
+        self._mutate("git", "rebase", "--abort")
 
 
-class GitHistory:
+class GitWarp:
     """Wraps git operations for a single repository.
 
     All public methods return a typed dataclass (StateResponse, ShowResponse);
-    known failures raise GitHistoryError. See SPEC.md for the public API
+    known failures raise GitWarpError. See SPEC.md for the public API
     contract and REST endpoints.
     """
 
@@ -484,10 +493,12 @@ class GitHistory:
         self._git = Git(repo_path)
         self._log_path = Path(log_path)
         # Caches keyed by full 40-char hash (immutable), so they never need invalidation.
+        # _commit_cache is unbounded, but most diffs are far smaller than _MAX_DIFF_CHARS,
+        # so even a 1000-commit session stays in the single-digit MB range; no cap needed.
         self._commit_cache = {}
         self._subject_cache = {}
         if not self._git.current_branch():
-            raise HistoryStateError("HEAD is detached; checkout a branch first")
+            raise WarpStateError("HEAD is detached; checkout a branch first")
         # Load reflog expiry once at startup, not per read_state() call
         raw_expiry = self._git.config_value("gc.reflogExpireUnreachable")
         self._reflog_expiry = raw_expiry.replace('.', ' ') if raw_expiry else "30 days"
@@ -509,12 +520,12 @@ class GitHistory:
         # Detached HEAD is unsupported for mutations: a reset/rebase there would move
         # HEAD without updating any branch, leaving the repo in an unspecified state.
         if not self._git.current_branch():
-            raise GitHistoryError("detached_head")
+            raise GitWarpError("detached_head")
 
     def _append_log(self):
         branch = self._git.current_branch()
-        head = self._git.resolve_commit("HEAD")
-        if branch and head:
+        if branch:
+            head = self._git.resolve_commit("HEAD")
             ts = datetime.datetime.now().isoformat(timespec="seconds")
             try:
                 with open(self._log_path, "a", encoding="utf-8") as f:
@@ -538,9 +549,9 @@ class GitHistory:
 
     def read_state(self, submodule_update_suggested=False):
         if self._start is not None and not self._git.is_ancestor(self._start, "HEAD"):
-            raise GitHistoryError(
+            raise GitWarpError(
                 "history_changed",
-                "Commit out of range; please restart git-history.")
+                "Commit out of range; please restart git-warp.")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             future_commits = executor.submit(self._list_commits)
@@ -566,13 +577,18 @@ class GitHistory:
             raw_undo_stack = future_branch_reflog.result()
             rebase_labels = future_rebase_labels.result()
 
+        # Populate the subject cache after the pool has joined, so no cache
+        # write races the parallel git calls. _process_undo_stack reuses these.
+        for c in commits:
+            self._subject_cache[c.commit_hash] = c.message.split("\n", 1)[0].rstrip()
+
         undo_stack = self._process_undo_stack(raw_undo_stack, rebase_labels)
 
         for c in commits:
             c.pushed = bool(status.upstream) and c.commit_hash not in unpushed
         if status.has_staged:
             staged = Commit(commit_hash=_STAGED_HASH, short_hash=_STAGED_HASH, message="(Staged changes)",
-                           author="", date="", branches=[_STAGED_HASH], tags=[])
+                           author="", date="", branches=[], tags=[])
             commits.insert(0, staged)
 
         return StateResponse(
@@ -593,20 +609,20 @@ class GitHistory:
     def get_history_state(self):
         """Get undo stack and current HEAD index for undo/redo operations.
 
-        Returns (history, head_index) tuple on success, raises HistoryStateError on failure.
+        Returns (history, head_index) tuple on success, raises WarpStateError on failure.
         """
         if self._git.in_rebase():
-            raise HistoryStateError("rebase in progress")
+            raise WarpStateError("rebase in progress")
         branch = self._git.current_branch()
         history = self._list_undo_stack(branch, self._build_head_rebase_labels())
         if not history:
-            raise HistoryStateError("no history available")
+            raise WarpStateError("no history available")
         head = self._git.resolve_commit("HEAD")
         hashes = [e.commit_hash for e in history]
         try:
             idx = hashes.index(head)
         except ValueError:
-            raise HistoryStateError("HEAD not in undo stack")
+            raise WarpStateError("HEAD not in undo stack")
         return history, idx
 
     def _get_unpushed_hashes(self, branch, upstream):
@@ -620,8 +636,6 @@ class GitHistory:
         for h, sh, author, date, body, refs in self._git.log_commits(rev_range):
             branches, tags = self._parse_refs(refs)
             message = body.rstrip("\n")
-            # Only _list_commits writes _subject_cache during read_state's parallel phase; safe via GIL and no concurrent cache readers
-            self._subject_cache[h] = message.split("\n", 1)[0].rstrip()
             commits.append(Commit(
                 commit_hash=h,
                 short_hash=sh[:7],
@@ -687,7 +701,7 @@ class GitHistory:
                 group = []
             elif gs.startswith("rebase (start)"):
                 if finish_hash:
-                    labels[finish_hash] = GitHistory._describe_rebase_group(group)
+                    labels[finish_hash] = GitWarp._describe_rebase_group(group)
                     finish_hash = None
                     group = []
             elif finish_hash is not None:
@@ -753,26 +767,26 @@ class GitHistory:
 
     def stash(self):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         self._require_branch()
         if not self._git.is_dirty():
-            raise GitHistoryError("nothing_to_stash")
+            raise GitWarpError("nothing_to_stash")
         self._git.stash_push()
         return self.read_state()
 
     def stash_pop(self):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         self._require_branch()
         if not self._git.has_stash():
-            raise GitHistoryError("no_stash")
+            raise GitWarpError("no_stash")
         if self._git.is_dirty():
-            raise GitHistoryError("dirty_tree")
+            raise GitWarpError("dirty_tree")
         try:
             self._git.stash_pop()
         except GitError:
             if self._git.conflict_files():
-                raise GitHistoryError("stash_conflict")
+                raise GitWarpError("stash_conflict")
             raise
         return self.read_state()
 
@@ -782,50 +796,50 @@ class GitHistory:
 
     def reset(self, commit_hash):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         self._require_branch()
         resolved_hash = self._git.resolve_commit(commit_hash)
         head_hash = self._git.resolve_commit("HEAD")
-        if head_hash and self._git.get_gitmodules(head_hash) != self._git.get_gitmodules(resolved_hash):
-            raise GitHistoryError("gitmodules_differ")
         if self._git.is_dirty():
-            raise GitHistoryError("dirty_tree")
+            raise GitWarpError("dirty_tree")
+        if head_hash and self._git.get_gitmodules(head_hash) != self._git.get_gitmodules(resolved_hash):
+            raise GitWarpError("gitmodules_differ")
         self._git.reset_hard(resolved_hash)
         self._append_log()
         return self.read_state(submodule_update_suggested=self._gitlinks_changed(head_hash))
 
     def create_branch(self, branch_name, commit_hash):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         resolved_hash = self._git.resolve_commit(commit_hash)
         self._git.create_branch(branch_name, resolved_hash)
         return self.read_state()
 
     def delete_branch(self, branch_name):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         if branch_name == self._git.current_branch():
-            raise GitHistoryError("cannot_delete_current_branch")
+            raise GitWarpError("cannot_delete_current_branch")
         self._git.delete_branch(branch_name)
         return self.read_state()
 
     def submodule_update(self):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         self._require_branch()
         self._git.submodule_update_init()
         return self.read_state()
 
     def switch_branch(self, branch, allow_different_gitmodules=False):
         if self._git.in_rebase():
-            raise GitHistoryError("rebase_in_progress")
+            raise GitWarpError("rebase_in_progress")
         if self._git.is_dirty():
-            raise GitHistoryError("dirty_tree")
+            raise GitWarpError("dirty_tree")
         if branch not in self._git.list_local_branches():
-            raise GitHistoryError("invalid_branch")
+            raise GitWarpError("invalid_branch")
         head_hash = self._git.resolve_commit("HEAD")
         if not allow_different_gitmodules and head_hash and self._git.get_gitmodules(head_hash) != self._git.get_gitmodules(self._git.resolve_commit(branch)):
-            raise GitHistoryError("gitmodules_differ")
+            raise GitWarpError("gitmodules_differ")
         self._git.switch(branch)
         self._start = None
         try:
@@ -842,23 +856,22 @@ class GitHistory:
         if commit_hash == _STAGED_HASH:
             diff, err = self._git.staged_diff()
             if diff is None:
-                raise GitHistoryError("git_failed", err)
-            return ShowResponse(commit=Commit(commit_hash=_STAGED_HASH, short_hash=_STAGED_HASH,
-                                              message="", author="", date="", branches=[], tags=[]),
+                raise GitWarpError("git_failed", err)
+            return ShowResponse(commit=ShowCommit(commit_hash=_STAGED_HASH, short_hash=_STAGED_HASH,
+                                                  message="", author="", date=""),
                                diff=self._truncate_diff(diff))
         resolved = self._git.resolve_commit(commit_hash)
         if resolved in self._commit_cache:
             return self._commit_cache[resolved]
         rec, err = self._git.commit_record(resolved)
         if rec is None:
-            raise GitHistoryError("git_failed", err)
-        h, sh, author, date, body, refs = rec
-        branches, tags = self._parse_refs(refs)
+            raise GitWarpError("git_failed", err)
+        h, sh, author, date, body = rec
         diff, err = self._git.commit_diff(resolved)
         if diff is None:
-            raise GitHistoryError("git_failed", err)
-        result = ShowResponse(commit=Commit(commit_hash=h, short_hash=sh[:7], message=body.rstrip("\n"),
-                                           author=author, date=date, branches=branches, tags=tags),
+            raise GitWarpError("git_failed", err)
+        result = ShowResponse(commit=ShowCommit(commit_hash=h, short_hash=sh[:7], message=body.rstrip("\n"),
+                                               author=author, date=date),
                              diff=self._truncate_diff(diff), files=self._git.commit_files(resolved))
         self._commit_cache[resolved] = result
         return result
@@ -953,28 +966,28 @@ class GitHistory:
         # repo returns to its original state instead of a half-finished rebase.
         try:
             state = self._rebase(instr)
-        except GitHistoryError:
+        except GitWarpError:
             raise
         except GitError:
             if self._git.in_rebase():
                 self._git.rebase_abort()
-            raise GitHistoryError("split_failed")
+            raise GitWarpError("split_failed")
         if state.rebase_in_progress:
             self._git.rebase_abort()
-            raise GitHistoryError("split_failed")
+            raise GitWarpError("split_failed")
         return state
 
     def _rebase(self, instr):
         try:
             if self._git.is_dirty():
-                raise GitHistoryError("dirty_tree")
+                raise GitWarpError("dirty_tree")
             if self._git.in_rebase():
-                raise GitHistoryError("invalid_request")
+                raise GitWarpError("invalid_request")
             self._require_branch()
 
             visible = [c.commit_hash for c in instr.visible_commits]
             if not visible:
-                raise GitHistoryError("invalid_request")
+                raise GitWarpError("invalid_request")
 
             self._git.rebase_interactive(instr.todo_lines, instr.base, instr.msg_path)
 
@@ -1003,7 +1016,7 @@ class GitHistory:
 
     def rebase_continue(self):
         if not self._git.in_rebase():
-            raise GitHistoryError("not_in_rebase")
+            raise GitWarpError("not_in_rebase")
         err = self._drive_continue()
         if err is not None:
             return err
@@ -1013,7 +1026,7 @@ class GitHistory:
 
     def rebase_abort(self):
         if not self._git.in_rebase():
-            raise GitHistoryError("not_in_rebase")
+            raise GitWarpError("not_in_rebase")
         self._git.rebase_abort()
         return self.read_state()
 
@@ -1021,12 +1034,12 @@ class GitHistory:
     # rebase helpers
     # ------------------------------------------------------------------
 
-    def _move_instructions(self, desired_commit_order, visible_commits):
+    def _move_instructions(self, desired_commit_order: list[str], visible_commits):
         visible = [c.commit_hash for c in visible_commits]
         if desired_commit_order is None or sorted(desired_commit_order) != sorted(visible):
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         if self._any_moved_commit_touches_gitmodules(visible, desired_commit_order):
-            raise GitHistoryError("gitmodules_in_range")
+            raise GitWarpError("gitmodules_in_range")
         changed_idx = [i for i, (h, h2) in enumerate(zip(visible, desired_commit_order)) if h != h2]
         if not changed_idx:
             return _RebaseInstructions(todo_lines=[], base=None, visible_commits=visible_commits)
@@ -1045,10 +1058,10 @@ class GitHistory:
     def _fold_instructions(self, hashes, operation, visible_commits):
         visible = [c.commit_hash for c in visible_commits]
         if not hashes or any(h not in visible for h in hashes):
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         indices = sorted(visible.index(h) for h in hashes)
         if indices != list(range(indices[0], indices[-1] + 1)):
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         if len(hashes) == 1:
             rebase_commands = {hashes[0]: operation}
         else:
@@ -1063,7 +1076,7 @@ class GitHistory:
         # Multi-select where the oldest stays the pick target is fine — it is not in
         # rebase_commands and the newer commits fold into it.
         if visible[-1] in rebase_commands:
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         return _RebaseInstructions(
             todo_lines=[f"{rebase_commands.get(h, 'pick')} {h}" for h in todo_hashes],
             base=base,
@@ -1081,10 +1094,10 @@ class GitHistory:
                 todo_lines.append(exec_line)
         return todo_lines, base
 
-    def _reword_instructions(self, commit_hash, message, visible_commits):
+    def _reword_instructions(self, commit_hash, message: str, visible_commits):
         visible = [c.commit_hash for c in visible_commits]
         if not (message and message.strip()) or commit_hash not in visible:
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         msg_path = _write_tempfile(message + "\n")
         exec_line = f"exec git commit --amend --allow-empty -F {shlex.quote(msg_path)}"
         todo_lines, base = self._pick_with_exec(visible, commit_hash, exec_line)
@@ -1093,17 +1106,17 @@ class GitHistory:
     def _split_instructions(self, commit_hash, files_to_split, visible_commits):
         visible = [c.commit_hash for c in visible_commits]
         if commit_hash not in visible:
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         try:
             self._git.resolve_commit(commit_hash + "^")  # root commit has no parent to reset onto
         except GitError:
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         if self._git.is_merge_commit(commit_hash) or self._git.commit_touches_gitmodules(commit_hash):
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         all_files = self._git.commit_files(commit_hash)
         selected = set(files_to_split)
         if not selected or not selected.issubset(all_files) or selected == set(all_files):
-            raise GitHistoryError("invalid_request")
+            raise GitWarpError("invalid_request")
         kept = [f for f in all_files if f not in selected]
         split = [f for f in all_files if f in selected]
         # Mixed reset leaves H's whole diff unstaged in the worktree; stage and

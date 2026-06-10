@@ -6,8 +6,8 @@ Git invokes this with a single file path (git-rebase-todo, COMMIT_EDITMSG,
 .git/rebase-merge/message, ...). We replace that file with the contents of a
 source file named by an environment variable:
 
-    git-rebase-todo   <- $GIT_HISTORY_TODO
-    anything else     <- $GIT_HISTORY_MSG
+    git-rebase-todo   <- $GIT_WARP_TODO
+    anything else     <- $GIT_WARP_MSG
 
 If the relevant env var is unset, the target file is left alone so git uses
 whatever it prepared itself (default concatenated squash message, etc).
@@ -22,9 +22,9 @@ def main():
     target = sys.argv[1]
     name = os.path.basename(target)
     if name == "git-rebase-todo":
-        src = os.environ.get("GIT_HISTORY_TODO")
+        src = os.environ.get("GIT_WARP_TODO")
     else:
-        src = os.environ.get("GIT_HISTORY_MSG")
+        src = os.environ.get("GIT_WARP_MSG")
     if not src:
         return
     try:

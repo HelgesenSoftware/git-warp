@@ -33,7 +33,7 @@
         C281.252,499.825,303.411,510.24,325.776,520.754z"/>
   </svg>
 
-  <!-- git-history text without outline -->
+  <!-- git-warp text without outline -->
   <text
     x="114"
     y="62"
@@ -42,5 +42,5 @@
     font-weight="bold"
     letter-spacing="-1"
     fill="#1a1a1a"
-  >git-history</text>
+  >git-warp</text>
 </svg>

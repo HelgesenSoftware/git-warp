@@ -31,7 +31,9 @@ body.dark #toolbar-logo-light { display: none; }
 body.dark #toolbar-logo-dark { display: block; }
 #toolbar-right { display: flex; gap: 8px; margin-left: auto; }
 #toolbar label { font-size: 13px; color: #666; white-space: nowrap; }
+body.dark #toolbar label { color: #999; }
 #branch-select { height: 32px; font-size: 13px; padding: 0 8px; border: 1px solid #ccc; border-radius: 4px; min-width: 180px; }
+body.dark #branch-select { border-color: var(--color-border); }
 button { padding: 5px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; }
 button:hover { background: #eee; }
 button:disabled { opacity: 0.4; cursor: default; }
@@ -61,7 +63,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 /* Commit row */
 .commit-row { display: flex; align-items: center; padding: 4px 16px; border-bottom: 1px solid #f0f0f0; gap: 8px; user-select: none; position: relative; }
-.commit-row:hover { background: #f8f8f8; }
+.commit-row:hover { background: #eee; }
 .commit-row.selected { background: #e3f2fd; }
 .commit-row .drag-handle { cursor: grab; font-size: 14px; font-weight: normal; flex-shrink: 0; width: 14px; }
 .commit-row .pushed-indicator { width: 16px; text-align: center; flex-shrink: 0; color: #2e7d32; font-size: 13px; }
@@ -75,11 +77,10 @@ button:disabled { opacity: 0.4; cursor: default; }
 .badge-tag { background: #f0f4c3; color: #827717; }
 .badge-staged { background: #ffcdd2; color: #b71c1c; }
 .commit-row .message { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: default; }
-.commit-row .message.editing { cursor: text; }
 .commit-row .author { color: #888; font-size: 12px; flex-shrink: 0; width: 90px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-row .date { color: #888; font-size: 12px; flex-shrink: 0; width: 110px; text-align: right; }
-.commit-row .row-actions { display: none; gap: 4px; flex-shrink: 0; }
-.commit-row:hover .row-actions { display: flex; }
+.commit-row .row-actions { display: flex; gap: 4px; flex-shrink: 0; visibility: hidden; }
+.commit-row:hover .row-actions { visibility: visible; }
 .row-actions button { border: none; background: none; cursor: pointer; font-size: 14px; padding: 2px 4px; }
 .row-actions .btn-fixup { padding: 0 4px; line-height: 1; overflow: visible; border: 1px solid transparent; border-radius: 3px; }
 .row-actions button:hover { background: #ddd; border-radius: 3px; }
@@ -136,7 +137,6 @@ body.dark #context-menu div:hover { background: #2a2a2b; }
 .help-modal-content { max-height: 80vh; overflow-y: auto; }
 .help-modal-content p { margin-top: 10px; line-height: 1.5; }
 .help-list li { font-family: inherit; font-size: 13px; margin: 6px 0; line-height: 1.5; }
-.help-note { background: #f5f5f5; border-left: 3px solid #ccc; padding: 8px 12px; border-radius: 3px; }
 
 /* Dark mode */
 body.dark #toolbar-right, body.dark #branch-select { background: var(--color-bg); color: var(--color-text); border-color: var(--color-border); }
@@ -188,4 +188,3 @@ body.dark .spinner-dot { border-color: var(--color-border); border-top-color: va
 body.dark .modal { background: rgba(0,0,0,0.8); }
 body.dark .modal-content { background: #252526; color: var(--color-text); box-shadow: 0 4px 24px rgba(0,0,0,0.6); }
 body.dark .modal-content h3 { color: var(--color-text); }
-body.dark .help-note { background: #2a2a2b; border-left-color: var(--color-border); }

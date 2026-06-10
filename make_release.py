@@ -39,6 +39,7 @@ def main():
     # Bring master up to develop, then collapse everything into one release commit
     git("checkout", "master")
     git("reset", "--hard", "develop")
+    git("fetch", "origin", "master")
     git("reset", "--soft", "origin/master")
     subprocess.run(["git", "restore", "--staged", "CLAUDE.md"], capture_output=True, check=False)
     if os.path.exists("CLAUDE.md"):
@@ -53,7 +54,7 @@ def main():
     since_clause = f"since tag {prev}" if prev else "(first release)"
 
     prompt = (
-        f"Write a markdown changelog for git-history v{version} {since_clause}. "
+        f"Write a markdown changelog for git-warp v{version} {since_clause}. "
         f"Save it as CHANGELOG.md."
     )
     subprocess.run(["claude", "-p", prompt, "--allowedTools", "Write,Bash"], check=True)

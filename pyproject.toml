@@ -3,24 +3,27 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "git-history"
-version = "0.0.6"
+name = "git-warp"
+version = "0.1.0"
+description = "Edit git commit history with full undo"
+readme = "README.md"
+license = {file = "LICENSE.md"}
 requires-python = ">=3.10"
 # Requires git >= 2.26 (for --empty=keep support in git rebase)
 dependencies = ["flask>=3.0"]
 
 [project.urls]
 Homepage = "http://helgesen.software"
-Repository = "https://github.com/BjarneHelgesen/git-history"
+Repository = "https://github.com/HelgesenSoftware/git-warp"
 
 [project.scripts]
-git-history = "git_history:main"
+git-warp = "git_warp:main"
 
 [tool.setuptools]
-packages = ["git_history"]
+packages = ["git_warp"]
 
 [tool.setuptools.package-data]
-git_history = ["static/**/*"]
+git_warp = ["static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

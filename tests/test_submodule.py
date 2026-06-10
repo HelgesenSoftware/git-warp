@@ -26,7 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 from make_test_repo import init_repo
 from conftest import _commit_raw
-from git_history.backend import GitHistory, GitHistoryError
+from git_warp.backend import GitWarp, GitWarpError
 from test_challenging import ChallengeBase, _git, _commit_env
 
 
@@ -88,7 +88,7 @@ class SubmoduleBase(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo, self.v1, self.v2 = _build_submodule_repo(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _by_msg(self, state=None):
         s = state or self.gh.read_state()
@@ -213,7 +213,7 @@ class ResetGitmodulesGuardTests(SubmoduleBase):
     def test_reset_blocked_when_target_removes_gitmodules(self):
         # HEAD has .gitmodules; target "base" has none
         bm = self._by_msg()
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.reset(bm["base"])
         self.assertEqual(cm.exception.code, "gitmodules_differ")
 
@@ -221,8 +221,8 @@ class ResetGitmodulesGuardTests(SubmoduleBase):
         # Park HEAD at "base" (no .gitmodules), attempt redo to "add lib"
         bm = self._by_msg()
         _git(self.repo, "git", "reset", "--hard", bm["base"])
-        self.gh = GitHistory(str(self.repo))
-        with self.assertRaises(GitHistoryError) as cm:
+        self.gh = GitWarp(str(self.repo))
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.reset(bm["add lib"])
         self.assertEqual(cm.exception.code, "gitmodules_differ")
 
@@ -257,7 +257,7 @@ class ResetGitmodulesGuardTests(SubmoduleBase):
         # Strip back to base then add a second clean commit
         _git(self.repo, "git", "reset", "--hard", bm["base"])
         _commit_raw(self.repo, "other.txt", b"x\n", "other", "bob", 10)
-        gh = GitHistory(str(self.repo))
+        gh = GitWarp(str(self.repo))
         target = gh.read_state().commits[-1].commit_hash
         result = gh.reset(target)
         self.assertTrue(result.ok)
@@ -267,17 +267,17 @@ class ResetGitmodulesGuardTests(SubmoduleBase):
         # .gitmodules identical between target and HEAD, but working tree is dirty
         bm = self._by_msg()
         (self.repo / "main.txt").write_bytes(b"dirty\n")
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.reset(bm["add lib"])
         self.assertEqual(cm.exception.code, "dirty_tree")
 
-    def test_gitmodules_check_takes_precedence_over_dirty_tree_check(self):
-        # When both .gitmodules differs AND tree is dirty, gitmodules_differ is returned
+    def test_dirty_tree_check_takes_precedence_over_gitmodules_check(self):
+        # When both .gitmodules differs AND tree is dirty, dirty_tree is returned
         bm = self._by_msg()
         (self.repo / "main.txt").write_bytes(b"dirty\n")
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.reset(bm["base"])
-        self.assertEqual(cm.exception.code, "gitmodules_differ")
+        self.assertEqual(cm.exception.code, "dirty_tree")
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +355,7 @@ class SubmoduleUpdateTests(SubmoduleBase):
         plain.mkdir()
         init_repo(plain)
         _commit_raw(plain, "a.txt", b"a\n", "first", "alice", 0)
-        result = GitHistory(str(plain)).submodule_update()
+        result = GitWarp(str(plain)).submodule_update()
         self.assertTrue(result.ok)
 
 
@@ -372,7 +372,7 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         # Move add lib to the front
         idx = order.index(bm["add lib"])
         order.insert(0, order.pop(idx))
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.move(order)
         self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
@@ -382,7 +382,7 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         order = self._order()
         idx = order.index(bm["add lib"])
         order.append(order.pop(idx))  # move to last position
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.move(order)
         self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
@@ -419,7 +419,7 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         # Rotate all four commits: add lib is among the movers
         order = self._order()
         rotated = order[1:] + [order[0]]
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.move(rotated)
         self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
@@ -444,7 +444,7 @@ class RebaseMoveGitmodulesTests(SubmoduleBase):
         order.insert(0, order.pop(idx))
         try:
             self.gh.move(order)
-        except GitHistoryError:
+        except GitWarpError:
             pass
         state = self.gh.read_state()
         self.assertFalse(state.rebase_in_progress)
@@ -566,7 +566,7 @@ class RebaseAfterGitmodulesTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo, self.v1 = _build_repo_commits_after_gitmodules(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _has_gitlink(self):
         r = _git(self.repo, "git", "ls-tree", "HEAD", "lib")
@@ -612,7 +612,7 @@ class RebaseAfterGitmodulesTests(ChallengeBase):
         order = self._order()
         al_idx = order.index(bm["add lib"])
         order.insert(0, order.pop(al_idx))
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.move(order)
         self.assertEqual(cm.exception.code, "gitmodules_in_range")
 
@@ -710,7 +710,7 @@ def _build_two_branch_submodule_repo(parent: Path):
     Returns (repo_path, v1, v2).
     """
     repo, v1, v2 = _build_submodule_repo(parent)
-    state = GitHistory(str(repo)).read_state()
+    state = GitWarp(str(repo)).read_state()
     bm = {c.message: c.commit_hash for c in state.commits}
     _git(repo, "git", "branch", "side", bm["add lib"])
     return repo, v1, v2
@@ -722,7 +722,7 @@ class SwitchBranchSubmoduleTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo, self.v1, self.v2 = _build_two_branch_submodule_repo(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _lib_head(self):
         return _git(self.repo / "lib", "git", "rev-parse", "HEAD").stdout.strip()
@@ -755,7 +755,7 @@ class SwitchBranchSubmoduleTests(ChallengeBase):
         _commit_raw(plain, "a.txt", b"a\n", "first", "alice", 0)
         _git(plain, "git", "branch", "other")
         _commit_raw(plain, "b.txt", b"b\n", "second", "bob", 1)
-        gh = GitHistory(str(plain))
+        gh = GitWarp(str(plain))
         result = gh.switch_branch("other")
         self.assertTrue(result.ok, f"switch failed: {result}")
         self.assertFalse(
@@ -768,7 +768,7 @@ class SwitchBranchSubmoduleTests(ChallengeBase):
         bm = {c.message: c.commit_hash for c in self.gh.read_state().commits}
         _git(self.repo, "git", "branch", "nosub", bm["base"])
         head_before = _git(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
-        with self.assertRaises(GitHistoryError) as cm:
+        with self.assertRaises(GitWarpError) as cm:
             self.gh.switch_branch("nosub")
         self.assertEqual(cm.exception.code, "gitmodules_differ")
         self.assertEqual(
@@ -842,7 +842,7 @@ class TrivialCommitsAboveGitlinkTests(ChallengeBase):
     def setUp(self):
         super().setUp()
         self.repo, self.v1, self.v2 = _build_repo_trivials_above_gitlink(self.tmpdir)
-        self.gh = GitHistory(str(self.repo))
+        self.gh = GitWarp(str(self.repo))
 
     def _has_gitlink(self):
         r = _git(self.repo, "git", "ls-tree", "HEAD", "lib")

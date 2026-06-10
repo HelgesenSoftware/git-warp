@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>git-history — Manual</title>
+<title>git-warp — Manual</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; color: #222; background: #f5f5f5; }
@@ -18,40 +18,46 @@ code { padding: 1px 5px; font-size: 13px; }
 pre { padding: 10px 14px; margin-top: 8px; overflow-x: auto; font-size: 13px; }
 em { color: #555; }
 strong { font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  body { color: #d4d4d4; background: #1e1e1e; }
+  h2 { border-bottom-color: #444; }
+  code, pre { background: #333; }
+  em { color: #aaa; }
+}
 </style>
 </head>
 <body>
 <div class="page">
-  <h1>git-history — Manual</h1>
+  <h1>git-warp — Manual</h1>
 
-  <h2>What is git-history?</h2>
-  <p>git-history is a local web app for interactively rewriting your git history, and it includes a full undo/redo stack. It lets you reorder, squash, fixup, and reword commits through a drag-and-drop interface in the browser.</p>
-  <p>It is intended for keeping feature branches tidy. All operations affect only the current local branch — nothing is pushed to the remote. If the rewritten parts of a branch has been pushed to a remote before the history rewrite, 
+  <h2>What is git-warp?</h2>
+  <p>git-warp is a local web app for interactively rewriting your git history, and it includes a full undo/redo stack. It lets you reorder, squash, fixup, and reword commits through a drag-and-drop interface in the browser.</p>
+  <p>It is intended for keeping feature branches tidy. All operations affect only the current local branch — nothing is pushed to the remote. If the rewritten parts of a branch have been pushed to a remote before the history rewrite, 
     it can be force pushed to the remote, but this is not recommended if other people are working on the same branch.</p>
   <p>All changes are applied to the repo <strong> immediately </strong> and all changes can be undone:</p>
 
 
   <h2>Requirements</h2>
   <ul>
-    <li>Python 3.9 or later</li>
+    <li>Python 3.10 or later</li>
     <li>Flask 3.0 or later (installed automatically)</li>
     <li>Git 2.26 or later</li>
   </ul>
 
   <h2>Installation</h2>
-  <pre>pip install git+https://github.com/BjarneHelgesen/git-history</pre>
-  <p>After installation, the <code>git-history</code> command is available in your terminal. If it is not found, your Python scripts directory may not be on your PATH. Find the location with:</p>
+  <pre>pip install git+https://github.com/HelgesenSoftware/git-warp</pre>
+  <p>After installation, the <code>git-warp</code> command is available in your terminal. If it is not found, your Python scripts directory may not be on your PATH. Find the location with:</p>
   <pre>python -m site --user-scripts</pre>
   <p>Add that directory to your PATH, or run the tool directly with:</p>
-  <pre>python -m git_history</pre>
+  <pre>python -m git_warp</pre>
 
   <h2>Starting the app</h2>
   <p>Run from inside any git repository:</p>
-  <pre>git-history [--port &lt;N&gt;] [--clear-log] [--dark] [--undo [N] | --redo [N]]</pre>
+  <pre>git-warp [--port &lt;N&gt;] [--clear-log] [--dark | --light] [--undo [N] | --redo [N]]</pre>
   <ul>
     <li><code>--port &lt;N&gt;</code> — TCP port for the server (default: auto-assigned)</li>
-    <li><code>--clear-log</code> — delete the operation log (<code>~/.git-history.log</code>) and exit</li>
-    <li><code>--dark</code> — enable dark mode</li>
+    <li><code>--clear-log</code> — delete the operation log (<code>~/.git-warp.log</code>) and exit</li>
+    <li><code>--dark</code> / <code>--light</code> — force a color scheme for the app (default: follow OS/browser setting)</li>
     <li><code>--undo [N]</code> — undo the last N operations (default: 1)</li>
     <li><code>--redo [N]</code> — redo the next N operations (default: 1)</li>
   </ul>
@@ -66,7 +72,7 @@ strong { font-weight: 600; }
   <p><strong>Stash</strong> — appears when there are uncommitted changes. Runs <code>git stash push</code>, clearing the working tree so rebase operations can proceed.</p>
   <p><strong>Stash Pop</strong> — appears when a stash exists. Runs <code>git stash pop</code>, restoring the previously stashed changes. Requires a clean working tree.</p>
   <p><strong>Refresh</strong> — reloads the commit list and Undo Stack from the repository. The list also refreshes automatically when you switch back to the browser tab, so you rarely need this button.</p>
-  <p><strong>Quit (×)</strong> — stops the git-history server and attempts to close the tab. Closing the browser tab without clicking Quit does not stop the server; it can still be stopped with Ctrl+C in the terminal.</p>
+  <p><strong>Quit (×)</strong> — stops the git-warp server and attempts to close the tab. Closing the browser tab without clicking Quit does not stop the server; it can still be stopped with Ctrl+C in the terminal.</p>
 
   <h2>Commit History</h2>
   <p>Shows commits on your current branch, newest first.</p>
@@ -88,10 +94,9 @@ strong { font-weight: 600; }
   <p>An undo stack for your local branch. Each entry is a unique state of the branch tip, recorded chronologically from when the branch was created.</p>
   <ul>
     <li><strong>Undo / Redo</strong> — step backwards or forwards through history.</li>
-    <li><strong>Right-click</strong> an entry and choose <strong>Reset to here</strong> to reset the branch to that state. Requires a clean working tree.</li>
-    <li><strong>Group consecutive rebases</strong> — collapses adjacent rebase entries into one, reducing noise.</li>
+    <li><strong>Double-click</strong> an entry to reset the branch to that state. Requires a clean working tree.</li>
   </ul>
-  <p>The Undo Stack reflects all local changes — commits, rebases, resets — whether made inside or outside git-history. When you pull or rebase from the remote, the update appears as a single entry.</p>
+  <p>The Undo Stack reflects all local changes — commits, rebases, resets — whether made inside or outside git-warp. When you pull or rebase from the remote, the update appears as a single entry.</p>
   <p><em>Note: the Undo Stack is kept as long as git's reflog retention settings allow (configured by <code>gc.reflogExpireUnreachable</code>, typically 30 days). Once commits are no longer reachable from the branch, they may be garbage collected and their entries will expire.</em></p>
   <p><em>Tip: a failed rebase can always be recovered with <code>git rebase --abort</code> in the terminal.</em></p>
 

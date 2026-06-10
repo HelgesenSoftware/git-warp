@@ -2,23 +2,23 @@ import argparse
 import logging
 import os
 import secrets
-import socket
 import subprocess
 import sys
 import webbrowser
 
 import flask.cli
+from werkzeug.serving import make_server
 
-import git_history.backend
-from git_history.rest_api import create_app
-from git_history.backend import GitHistory, GitError, GitHistoryError, HistoryStateError
+import git_warp.backend
+from git_warp.rest_api import create_app
+from git_warp.backend import GitWarp, GitError, GitWarpError, WarpStateError
 
 
 def _get_history_index(gh):
     """Get undo stack and current HEAD index. Exits on error."""
     try:
         return gh.get_history_state()
-    except HistoryStateError as e:
+    except WarpStateError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -30,7 +30,7 @@ def _set_history_index(gh, history, target_idx):
         sys.exit(1)
     try:
         gh.reset(history[target_idx].commit_hash)
-    except GitHistoryError as e:
+    except GitWarpError as e:
         print(f"error: {e.code}: {e.message}", file=sys.stderr)
         sys.exit(1)
     except GitError as e:
@@ -48,8 +48,11 @@ def main():
                         help="TCP port for the server (default: auto-assigned)")
     parser.add_argument("--clear-log", action="store_true",
                         help="delete the log file and exit")
-    parser.add_argument("--dark", action="store_true",
-                        help="enable dark mode")
+    _color_scheme = parser.add_mutually_exclusive_group()
+    _color_scheme.add_argument("--dark", action="store_true",
+                                help="force dark mode (default: follow OS)")
+    _color_scheme.add_argument("--light", action="store_true",
+                                help="force light mode (default: follow OS)")
     _undo_redo = parser.add_mutually_exclusive_group()
     _undo_redo.add_argument("--undo", nargs="?", const=1, type=int, metavar="N",
                             help="undo the last N operations (default: 1)")
@@ -58,11 +61,11 @@ def main():
     args = parser.parse_args()
 
     if args.clear_log:
-        if git_history.backend._LOG_PATH.exists():
-            git_history.backend._LOG_PATH.unlink()
-            print(f"Deleted {git_history.backend._LOG_PATH}")
+        log_path, existed = git_warp.backend.clear_log()
+        if existed:
+            print(f"Deleted {log_path}")
         else:
-            print(f"No log file at {git_history.backend._LOG_PATH}")
+            print(f"No log file at {log_path}")
         sys.exit(0)
 
     # Require git >= 2.26.
@@ -81,8 +84,8 @@ def main():
     # Run as command line tool for undo/redo
     if args.undo is not None:
         try:
-            gh = GitHistory(os.getcwd())
-        except HistoryStateError as e:
+            gh = GitWarp(os.getcwd())
+        except WarpStateError as e:
             print(f"fatal: {e}", file=sys.stderr)
             sys.exit(1)
         history, idx = _get_history_index(gh)
@@ -90,36 +93,37 @@ def main():
         sys.exit(0)
     if args.redo is not None:
         try:
-            gh = GitHistory(os.getcwd())
-        except HistoryStateError as e:
+            gh = GitWarp(os.getcwd())
+        except WarpStateError as e:
             print(f"fatal: {e}", file=sys.stderr)
             sys.exit(1)
         history, idx = _get_history_index(gh)
         _set_history_index(gh, history, idx - args.redo)
         sys.exit(0)
     # Run web server UI
-    port = args.port
-    if port == 0:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
     token = secrets.token_urlsafe(24)
     repo_path = os.getcwd()
 
     try:
         app = create_app(repo_path, token)
-    except HistoryStateError as e:
+    except WarpStateError as e:
         print(f"fatal: {e}", file=sys.stderr)
         sys.exit(1)
 
     logging.getLogger("werkzeug").setLevel(logging.ERROR)
     flask.cli.show_server_banner = lambda *_: None
 
-    url = f"http://127.0.0.1:{port}/?t={token}" + ("&dark=1" if args.dark else "")
-    print(f"git-history running at {url}  —  Ctrl+C to quit")
+    httpd = make_server("127.0.0.1", args.port, app, threaded=False)
+    port = httpd.server_port
+
+    url = f"http://127.0.0.1:{port}/?t={token}"
+    if args.dark:
+        url += "&dark=1"
+    elif args.light:
+        url += "&light=1"
+    print(f"git-warp running at {url}  —  Ctrl+C to quit")
     webbrowser.open(url)
-    app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False, threaded=False)
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

@@ -1,27 +1,57 @@
-"""Tests for the git_history.py CLI entry point.
+"""Tests for the git_warp CLI entry point.
 
 Only the early-exit error paths are tested here; the happy path (server starts,
 browser opens) requires interactive verification — see manual_test.md.
 """
+import contextlib
+import io
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from conftest import _ensure_persistent_test_repo
+from git_warp import main as _git_warp_main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _run_cli(args, cwd):
     return subprocess.run(
-        [sys.executable, "-m", "git_history"] + args,
+        [sys.executable, "-m", "git_warp"] + args,
         capture_output=True, text=True, cwd=str(cwd),
         env={**__import__("os").environ, "PYTHONPATH": str(REPO_ROOT)},
     )
+
+
+class _Result:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _run_cli_inproc(args, cwd):
+    """Run main() in-process, avoiding a fresh interpreter per call."""
+    out, err = io.StringIO(), io.StringIO()
+    returncode = 0
+    cwd_before = os.getcwd()
+    try:
+        os.chdir(cwd)
+        with patch.object(sys, "argv", ["git-warp"] + args), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                _git_warp_main()
+            except SystemExit as e:
+                returncode = e.code or 0
+    finally:
+        os.chdir(cwd_before)
+    return _Result(returncode, out.getvalue(), err.getvalue())
 
 
 @pytest.mark.release
@@ -66,7 +96,7 @@ def test_undo_one_commit():
         repo = _setup_test_repo_with_history(tmpdir)
         head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                                      capture_output=True, text=True).stdout.strip()
-        r = _run_cli(["--undo"], repo)
+        r = _run_cli_inproc(["--undo"], repo)
         assert r.returncode == 0
         assert "At history index" in r.stdout
         head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
@@ -77,7 +107,7 @@ def test_undo_one_commit():
 def test_undo_multiple_commits():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
-        r = _run_cli(["--undo", "2"], repo)
+        r = _run_cli_inproc(["--undo", "2"], repo)
         assert r.returncode == 0
         assert "At history index" in r.stdout
 
@@ -85,10 +115,10 @@ def test_undo_multiple_commits():
 def test_redo_one_commit():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
-        _run_cli(["--undo"], repo)
+        _run_cli_inproc(["--undo"], repo)
         head_before_redo = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                                           capture_output=True, text=True).stdout.strip()
-        r = _run_cli(["--redo"], repo)
+        r = _run_cli_inproc(["--redo"], repo)
         assert r.returncode == 0
         assert "At history index" in r.stdout
         head_after_redo = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
@@ -100,7 +130,7 @@ def test_redo_one_commit():
 def test_undo_too_many():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
-        r = _run_cli(["--undo", "100"], repo)
+        r = _run_cli_inproc(["--undo", "100"], repo)
         assert r.returncode != 0
         assert "error:" in r.stderr
 
@@ -110,8 +140,8 @@ def test_undo_redo_are_inverses():
         repo = _setup_test_repo_with_history(tmpdir)
         original_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                                        capture_output=True, text=True).stdout.strip()
-        _run_cli(["--undo"], repo)
-        _run_cli(["--redo"], repo)
+        _run_cli_inproc(["--undo"], repo)
+        _run_cli_inproc(["--redo"], repo)
         final_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                                     capture_output=True, text=True).stdout.strip()
         assert final_head == original_head
@@ -121,7 +151,7 @@ def test_undo_redo_are_inverses():
 def test_redo_at_tip():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
-        r = _run_cli(["--redo"], repo)
+        r = _run_cli_inproc(["--redo"], repo)
         assert r.returncode != 0
         assert "error:" in r.stderr
 
@@ -130,6 +160,6 @@ def test_redo_at_tip():
 def test_undo_and_redo_mutually_exclusive():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _setup_test_repo_with_history(tmpdir)
-        r = _run_cli(["--undo", "--redo"], repo)
+        r = _run_cli_inproc(["--undo", "--redo"], repo)
         assert r.returncode != 0
         assert "error" in r.stderr.lower()

@@ -1,4 +1,4 @@
-/* git-history front-end */
+/* git-warp front-end */
 (function () {
   "use strict";
 
@@ -6,13 +6,18 @@
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get("t");
   const dark = params.get("dark") === "1";
+  const light = params.get("light") === "1";
   if (urlToken) {
-    sessionStorage.setItem("git_history_token", urlToken);
-    history.replaceState(null, "", dark ? "/?dark=1" : "/");
+    sessionStorage.setItem("git_warp_token", urlToken);
+    let query = "";
+    if (dark) query = "?dark=1";
+    else if (light) query = "?light=1";
+    history.replaceState(null, "", "/" + query);
   }
-  const TOKEN = sessionStorage.getItem("git_history_token") || "";
+  const TOKEN = sessionStorage.getItem("git_warp_token") || "";
   const HEADERS = {"X-Token": TOKEN};
-  if (dark) document.body.classList.add("dark");
+  const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+  if (dark || (prefersDark && !light)) document.body.classList.add("dark");
 
   // ---- State ----
   const STAGED_HASH = "(Staged)";
@@ -42,7 +47,7 @@
   const $ctxDeleteBranch  = document.getElementById("ctx-delete-branch");
   const $commitsList = document.getElementById("commits-list");
   const $undoStackList  = document.getElementById("undo-stack-list");
-  const $undoStackTitle  = document.getElementById("undo-stack-title-text");
+  const $undoStackExpiry = document.getElementById("undo-stack-expiry");
   const $conflictModal = document.getElementById("conflict-modal");
   const $conflictFiles = document.getElementById("conflict-files");
   const $btnAbort    = document.getElementById("btn-abort");
@@ -97,8 +102,8 @@
     }
     const resp = await fetch(url, opts);
     if (resp.status === 403) {
-      sessionStorage.removeItem("git_history_token");
-      throw new Error("git-history is not running");
+      sessionStorage.removeItem("git_warp_token");
+      throw new Error("This git-warp tab has expired. Switch tab or restart git-warp");
     }
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
@@ -134,7 +139,7 @@
   // ---- Render ----
   function render() {
     if (!state) return;
-    $undoStackTitle.innerHTML = "<strong>Undo Stack</strong> (Expiry: " + state.reflog_expiry + ")";
+    $undoStackExpiry.textContent = state.reflog_expiry;
 
     // Branch dropdown
     $branchSelect.innerHTML = "";
@@ -194,7 +199,6 @@
     row.className = "commit-row" + (selected.has(commit.commit_hash) ? " selected" : "") + (commit.is_head ? " is-head" : "");
     row.dataset.commitHash = commit.commit_hash;
     row.dataset.idx = idx;
-    row.dataset.message = commit.message;
 
     // Drag handle
     const handle = document.createElement("span");
@@ -223,17 +227,22 @@
     // Badges
     const badges = document.createElement("span");
     badges.className = "badges";
+    if (commit.commit_hash === STAGED_HASH) {
+      const s = document.createElement("span");
+      s.className = "badge-staged";
+      s.textContent = "Staged";
+      badges.appendChild(s);
+    }
     commit.branches.forEach(function (b) {
       const s = document.createElement("span");
       let badgeClass;
-      if (b === STAGED_HASH) badgeClass = "badge-staged";
-      else if (b === state.branch) badgeClass = "badge-branch-current";
+      if (b === state.branch) badgeClass = "badge-branch-current";
       else if (b === state.upstream) badgeClass = "badge-branch-tracking";
       else if (state.branches.indexOf(b) !== -1) badgeClass = "badge-branch";
       else badgeClass = "badge-branch-remote";
       s.className = badgeClass;
-      s.textContent = b === STAGED_HASH ? "Staged" : b;
-      if (b !== STAGED_HASH) s.dataset.branch = b;
+      s.textContent = b;
+      s.dataset.branch = b;
       badges.appendChild(s);
     });
     commit.tags.forEach(function (t) {
@@ -330,8 +339,8 @@
     $undoStackList.innerHTML = "";
     $btnUndo.disabled = !canMutate() || headIdx === -1 || headIdx === entries.length - 1;
     $btnRedo.disabled = !canMutate() || headIdx <= 0;
-    entries.forEach(function (entry) {
-      const isHead = entry.commit_hash === entries[headIdx]?.commit_hash;
+    entries.forEach(function (entry, idx) {
+      const isHead = idx === headIdx;
       const row = document.createElement("div");
       row.className = "undo-stack-row" + (isHead ? " is-head" : "");
 
@@ -352,7 +361,7 @@
 
       row.addEventListener("dblclick", function (e) {
         e.preventDefault();
-        if (!isHead) doReset(entry.commit_hash);
+        if (canMutate() && !isHead) doReset(entry.commit_hash);
       });
       $undoStackList.appendChild(row);
     });
@@ -576,8 +585,7 @@
   async function showDiff(hash) {
     try {
       diffHash = hash;
-      selectedFilesInDiff.clear();
-      const data = await api("GET", "/api/show?commit_hash=" + hash);
+      const data = await api("GET", "/api/show?commit_hash=" + encodeURIComponent(hash));
       if (diffHash !== hash) return; // a newer showDiff call may have run during the await
       renderDiff(data, hash);
     } catch (err) { showBanner("Failed to load diff: " + err.message, "error"); }
@@ -586,6 +594,7 @@
   function renderDiff(data, hash) {
     diffHash = hash;
     selectedFilesInDiff.clear();
+    splitAnchor = null;
     if (data.ok) {
       // Format commit message and metadata
       let headerLines = [];
@@ -699,7 +708,7 @@
       }
       if (data.ok && data.submodule_update_suggested) {
         showModal("Submodule pointers have changed. Run git submodule update --init? " +
-                  "Refusing leaves the working tree dirty, which disables git-history.", false).then(async function (ok) {
+                  "Refusing leaves the working tree dirty, which disables git-warp.", false).then(async function (ok) {
           if (!ok) return;
           await spinnerCall("POST", "/api/submodule/update");
         });
@@ -712,6 +721,7 @@
         "cannot_delete_current_branch": "Cannot delete the current branch.",
         "stash_conflict": "Stash pop caused conflicts. Resolve them in your editor, then run git stash drop.",
       };
+      render();
       showBanner(errorMessages[data.error] || data.message || data.error || "Operation failed", "error");
     }
   }
@@ -751,16 +761,19 @@
   $btnContinue.addEventListener("click", () => spinnerCall("POST", "/api/rebase/continue"));
 
   $btnSplit.addEventListener("click", () => {
+    const selectIdx = state.commits.findIndex(function (c) { return c.commit_hash === diffHash; });
     spinnerCall("POST", "/api/rebase/split", {
       commit_hash: diffHash,
       files_to_split: Array.from(selectedFilesInDiff),
-    });
+    }, selectIdx);
   });
 
   // Keyboard shortcuts
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
-      if (selected.size) { selected.clear(); anchor = null; renderCommits(); }
+      if (!$promptModal.classList.contains("hidden")) return;
+      if (document.querySelector(".reword-input")) return;
+      if (selected.size) { selected.clear(); anchor = null; renderCommits(); updateActionBar(); }
     }
   });
 

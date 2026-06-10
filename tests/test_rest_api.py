@@ -1,11 +1,11 @@
 """
-Unit tests for the git-history REST API.
+Unit tests for the git-warp REST API.
 
 These tests exercise the Flask endpoints defined in the plan. They verify
 HTTP methods, status codes, JSON structure, auth token enforcement, and that
-each endpoint correctly delegates to the GitHistory backend.
+each endpoint correctly delegates to the GitWarp backend.
 
-The Flask app is expected to live in ``git_history.py`` and expose a
+The Flask app is expected to live in ``git_warp.py`` and expose a
 ``create_app(repo_path, token)`` factory that returns a configured Flask app.
 
 Endpoints under test:
@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from make_test_repo import COMMITS, create_lib_repo, init_repo, make_commit
 from conftest import _ensure_persistent_test_repo, _commit_raw
-from git_history.rest_api import create_app
+from git_warp.rest_api import create_app
 
 
 TOKEN = "test-token-abc123"
@@ -58,16 +58,22 @@ class StandardAPITest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-api-test-"))
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-warp-api-test-"))
         cls.repo = cls.tmpdir / "repo"
         persistent_repo = _ensure_persistent_test_repo()
-        subprocess.run(["git", "clone", str(persistent_repo), str(cls.repo)],
+        # Set clone-time local config (-c) to avoid extra subprocess spawns:
+        #   protocol.file.allow — file:// submodule operations (as persistent repo)
+        #   user.name/email     — git clone does not copy local user config, and CI
+        #                         runners have no global identity, so rebases that
+        #                         create commits would otherwise fail.
+        subprocess.run(["git", "clone",
+                        "-c", "protocol.file.allow=always",
+                        "-c", "user.name=Test User",
+                        "-c", "user.email=test@example.com",
+                        str(persistent_repo), str(cls.repo)],
                        capture_output=True, check=True)
         # Remove origin remote (clone sets it to persistent repo, but tests expect no remote)
         subprocess.run(["git", "remote", "remove", "origin"],
-                       cwd=str(cls.repo), capture_output=True)
-        # Allow file:// URLs for submodule operations (same as persistent repo)
-        subprocess.run(["git", "config", "protocol.file.allow", "always"],
                        cwd=str(cls.repo), capture_output=True)
         # Ensure refs/heads/main reflog has at least one entry (not guaranteed after a fresh clone).
         subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(cls.repo), capture_output=True)
@@ -87,26 +93,33 @@ class StandardAPITest(unittest.TestCase):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     def setUp(self):
-        # Reset repo to original state before each test (avoid state leakage between tests)
-        subprocess.run(["git", "rebase", "--abort"], cwd=str(self.__class__.repo),
-                       capture_output=True)
-        subprocess.run(["git", "remote", "remove", "origin"], cwd=str(self.__class__.repo),
-                       capture_output=True)
-        subprocess.run(["git", "checkout", self.__class__.initial_branch],
-                       cwd=str(self.__class__.repo), capture_output=True)
-        subprocess.run(["git", "reset", "--hard", self.__class__.initial_head],
-                       cwd=str(self.__class__.repo), capture_output=True, check=True)
-        subprocess.run(["git", "clean", "-fd"], cwd=str(self.__class__.repo),
-                       capture_output=True)
-        # Delete branches created by tests (but keep main and feature)
-        for branch in ["feature/my-feature", "bugfix/issue-123"]:
-            subprocess.run(["git", "branch", "-D", branch], cwd=str(self.__class__.repo),
-                           capture_output=True)
-        # Clear reflog to remove undo stack entries from previous tests
-        branch = self.__class__.initial_branch
-        subprocess.run(["git", "reflog", "expire", "--expire=now",
-                       f"refs/heads/{branch}"], cwd=str(self.__class__.repo),
-                       capture_output=True)
+        repo = str(self.__class__.repo)
+        initial_head = self.__class__.initial_head
+        initial_branch = self.__class__.initial_branch
+        # Guard: skip full reset for tests that left the repo in a clean state
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                              capture_output=True, text=True).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain", "-b"], cwd=repo,
+                                capture_output=True, text=True).stdout
+        extra_branches = subprocess.run(
+            ["git", "branch", "--list", "feature/my-feature", "bugfix/issue-123"],
+            cwd=repo, capture_output=True, text=True).stdout.strip()
+        # Exact branch-line match catches rebase-in-progress ("## HEAD (no branch)")
+        # and added remotes ("## main...origin/main"), both differ from "## main"
+        needs_reset = (head != initial_head
+                       or status.strip() != f"## {initial_branch}"
+                       or extra_branches)
+        if needs_reset:
+            subprocess.run(["git", "rebase", "--abort"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "remote", "remove", "origin"], cwd=repo, capture_output=True)
+            subprocess.run(["git", "checkout", initial_branch], cwd=repo, capture_output=True)
+            subprocess.run(["git", "reset", "--hard", initial_head],
+                           cwd=repo, capture_output=True, check=True)
+            subprocess.run(["git", "clean", "-fd"], cwd=repo, capture_output=True)
+            for branch in ["feature/my-feature", "bugfix/issue-123"]:
+                subprocess.run(["git", "branch", "-D", branch], cwd=repo, capture_output=True)
+            subprocess.run(["git", "reflog", "expire", "--expire=now",
+                           f"refs/heads/{initial_branch}"], cwd=repo, capture_output=True)
         # Clean up tmpdir subdirectories created by tests
         for item in self.__class__.tmpdir.iterdir():
             if item.name != "repo" and item.is_dir():
@@ -1004,12 +1017,19 @@ class ConflictEndpointTests(StandardAPITest):
         order[i_a], order[i_b] = order[i_b], order[i_a]
         return self.post("/api/rebase/move", json={ "order": order})
 
+    @pytest.mark.release
     def test_move_produces_conflict(self):
         data = self._swap_order().get_json()
         self.assertFalse(data["ok"])
         self.assertTrue(data.get("conflict"))
         self.assertIn("README.md", data["conflict_files"])
         self.assertTrue(data["rebase_in_progress"])
+        # Conflict response must carry the full state fields, not just conflict
+        # info, so the frontend can refresh uniformly.
+        for field in ("branch", "branches", "commits", "undo_stack",
+                      "dirty", "has_stash", "submodule_update_suggested"):
+            self.assertIn(field, data)
+        self.assertTrue(data["commits"])
 
     def test_abort_clears_conflict(self):
         self._swap_order()
@@ -1024,17 +1044,6 @@ class ConflictEndpointTests(StandardAPITest):
         self.assertFalse(data["ok"])
         self.assertTrue(data.get("conflict"))
         self.assertTrue(data["rebase_in_progress"])
-
-    @pytest.mark.release
-    def test_conflict_response_includes_full_state(self):
-        data = self._swap_order().get_json()
-        self.assertTrue(data.get("conflict"))
-        # Conflict response must carry the full state fields, not just conflict
-        # info, so the frontend can refresh uniformly.
-        for field in ("branch", "branches", "commits", "undo_stack",
-                      "dirty", "has_stash", "submodule_update_suggested"):
-            self.assertIn(field, data)
-        self.assertTrue(data["commits"])
 
     def test_continue_after_resolving(self):
         self._swap_order()
@@ -1080,7 +1089,7 @@ class QuitEndpointTests(StandardAPITest):
 
     @pytest.mark.release
     def test_quit_returns_ok(self):
-        with patch("git_history.os._exit"):
+        with patch("git_warp.os._exit"):
             data = self.post("/api/quit").get_json()
         self.assertTrue(data["ok"])
 
@@ -1099,7 +1108,7 @@ class ManualPageTests(StandardAPITest):
 
     def test_manual_contains_html(self):
         resp = self.client.get("/manual")
-        self.assertIn(b"git-history", resp.data)
+        self.assertIn(b"git-warp", resp.data)
 
     def test_manual_requires_no_token(self):
         resp = self.client.get("/manual")
@@ -1113,18 +1122,6 @@ class ManualPageTests(StandardAPITest):
 class RebaseConsecutiveEndpointTests(StandardAPITest):
 
     @pytest.mark.release
-    def test_squash_non_adjacent_commits_returns_invalid_request(self):
-        state = self.get("/api/state").get_json()
-        h0 = state["commits"][0]["commit_hash"]
-        h2 = state["commits"][2]["commit_hash"]
-
-        data = self.post("/api/rebase/squash", json={
-            "commit_hashes": [h0, h2],
-        }).get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], "invalid_request")
-
-    @pytest.mark.release
     def test_fixup_non_adjacent_commits_returns_invalid_request(self):
         state = self.get("/api/state").get_json()
         h0 = state["commits"][0]["commit_hash"]
@@ -1136,14 +1133,6 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "invalid_request")
 
-    @pytest.mark.release
-    def test_squash_non_adjacent_does_not_modify_commit_history(self):
-        state = self.get("/api/state").get_json()
-        hashes_before = [c["commit_hash"] for c in state["commits"]]
-        self.post("/api/rebase/squash", json={ "commit_hashes": [hashes_before[0], hashes_before[3]]})
-        hashes_after = [c["commit_hash"] for c in self.get("/api/state").get_json()["commits"]]
-        self.assertEqual(hashes_after, hashes_before)
-
     def test_squash_three_adjacent_commits_is_valid(self):
         state = self.get("/api/state").get_json()
         hashes = [state["commits"][i]["commit_hash"] for i in range(3)]
@@ -1152,19 +1141,18 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
         self.assertEqual(len(data["commits"]), len(state["commits"]) - 2)
 
     @pytest.mark.release
-    def test_squash_non_consecutive_rejects_and_preserves_head(self):
+    def test_squash_non_adjacent_rejects_and_preserves_history(self):
         state = self.get("/api/state").get_json()
-        initial_head = state["commits"][0]["commit_hash"]
-        h0 = state["commits"][0]["commit_hash"]
-        h2 = state["commits"][2]["commit_hash"]
+        hashes_before = [c["commit_hash"] for c in state["commits"]]
 
         data = self.post("/api/rebase/squash", json={
-            "commit_hashes": [h0, h2],
+            "commit_hashes": [hashes_before[0], hashes_before[2]],
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "invalid_request")
-        state_after = self.get("/api/state").get_json()
-        self.assertEqual(state_after["commits"][0]["commit_hash"], initial_head)
+
+        hashes_after = [c["commit_hash"] for c in self.get("/api/state").get_json()["commits"]]
+        self.assertEqual(hashes_after, hashes_before)
 
 
 # ---------------------------------------------------------------------------
@@ -1428,51 +1416,54 @@ class ErrorResponseStructureTests(StandardAPITest):
 class UndoStackLabelTests(StandardAPITest):
 
     @pytest.mark.release
-    def test_reword_produces_reword_entry(self):
+    def test_sequential_operations_produce_expected_labels(self):
         state = self.get("/api/state").get_json()
-        h = state["commits"][0]["commit_hash"]
-        data = self.post("/api/rebase/reword", json={
-            "commit_hashes": [h], "new_message": "Rewarded top",
+
+        # reword the newest commit
+        h0 = state["commits"][0]["commit_hash"]
+        r1 = self.post("/api/rebase/reword", json={
+            "commit_hashes": [h0], "new_message": "Rewarded top",
         }).get_json()
-        self.assertTrue(data["ok"])
-        entries = [e for e in data["undo_stack"] if e["label"].startswith("reword:")]
+        self.assertTrue(r1["ok"])
+        entries = [e for e in r1["undo_stack"] if e["label"].startswith("reword:")]
         self.assertEqual(len(entries), 1)
         self.assertIn("Rewarded top", entries[0]["label"])
 
-    @pytest.mark.release
-    def test_fixup_produces_fixup_entry(self):
-        state = self.get("/api/state").get_json()
-        # fixup folds commits[0] into its parent; the label names the destination.
-        dest_msg = state["commits"][1]["message"]
-        data = self.post("/api/rebase/fixup", json={
-            "commit_hashes": [state["commits"][0]["commit_hash"]],
-        }).get_json()
-        self.assertTrue(data["ok"])
-        entries = [e for e in data["undo_stack"] if e["label"].startswith("fixup:")]
-        self.assertEqual(len(entries), 1)
-        self.assertIn(dest_msg.split("\n")[0], entries[0]["label"])
-
-    @pytest.mark.release
-    def test_move_produces_reorder_entry(self):
-        state = self.get("/api/state").get_json()
-        order = [c["commit_hash"] for c in state["commits"]]
+        # move: swap the two newest commits
+        order = [c["commit_hash"] for c in r1["commits"]]
         order[0], order[1] = order[1], order[0]
-        data = self.post("/api/rebase/move", json={ "order": order}).get_json()
-        self.assertTrue(data["ok"])
-        entries = [e for e in data["undo_stack"] if e["label"].startswith("reorder")]
+        r2 = self.post("/api/rebase/move", json={"order": order}).get_json()
+        self.assertTrue(r2["ok"])
+        entries = [e for e in r2["undo_stack"] if e["label"].startswith("reorder")]
         self.assertEqual(len(entries), 1)
 
-    @pytest.mark.release
-    def test_squash_produces_squash_entry(self):
-        state = self.get("/api/state").get_json()
-        # squash folds into the oldest selected commit; the label names that destination.
-        dest_msg = state["commits"][1]["message"]
-        hashes = [state["commits"][0]["commit_hash"], state["commits"][1]["commit_hash"]]
-        data = self.post("/api/rebase/squash", json={ "commit_hashes": hashes}).get_json()
-        self.assertTrue(data["ok"])
-        entries = [e for e in data["undo_stack"] if e["label"].startswith("squash:")]
+        # squash: fold the two newest (now reordered) commits into the older one
+        dest_msg = r2["commits"][1]["message"]
+        hashes = [r2["commits"][0]["commit_hash"], r2["commits"][1]["commit_hash"]]
+        r3 = self.post("/api/rebase/squash", json={"commit_hashes": hashes}).get_json()
+        self.assertTrue(r3["ok"])
+        entries = [e for e in r3["undo_stack"] if e["label"].startswith("squash:")]
         self.assertEqual(len(entries), 1)
         self.assertIn(dest_msg.split("\n")[0], entries[0]["label"])
+
+        # fixup: fold the new top commit into its parent
+        dest_msg = r3["commits"][1]["message"]
+        r4 = self.post("/api/rebase/fixup", json={
+            "commit_hashes": [r3["commits"][0]["commit_hash"]],
+        }).get_json()
+        self.assertTrue(r4["ok"])
+        entries = [e for e in r4["undo_stack"] if e["label"].startswith("fixup:")]
+        self.assertEqual(len(entries), 1)
+        self.assertIn(dest_msg.split("\n")[0], entries[0]["label"])
+
+        # reset to an earlier commit
+        target = r4["commits"][3]
+        r5 = self.post("/api/reset", json={"commit_hash": target["commit_hash"]}).get_json()
+        self.assertTrue(r5["ok"])
+        entries = [e for e in r5["undo_stack"] if e["label"].startswith("reset:")]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["label"], f"reset: {target['message'].split(chr(10))[0]}")
+        self.assertNotIn("\n", entries[0]["label"])
 
     @pytest.mark.release
     def test_squash_three_commits_names_destination_once(self):
@@ -1490,7 +1481,7 @@ class UndoStackLabelTests(StandardAPITest):
 
     @pytest.mark.release
     def test_mixed_operation_rebase_produces_generic_rebase_label(self):
-        """Mixed rebase (reword + fixup) done outside git-history should label as 'rebase'."""
+        """Mixed rebase (reword + fixup) done outside git-warp should label as 'rebase'."""
         state = self.get("/api/state").get_json()
         self.assertGreaterEqual(len(state["commits"]), 3, "Need at least 3 commits for this test")
         h0 = state["commits"][0]["commit_hash"]  # newest
@@ -1502,14 +1493,14 @@ class UndoStackLabelTests(StandardAPITest):
         todo_path.write_text(f"reword {h1}\nfixup {h0}\n")
         msg_path.write_text("Mixed operation reworded commit\n")
         # Set up environment to use the editor shim (same pattern as backend._rebase_env)
-        editor_py = REPO_ROOT / "git_history" / "editor.py"
+        editor_py = REPO_ROOT / "git_warp" / "editor.py"
         editor_cmd = f"{shlex.quote(sys.executable)} {shlex.quote(str(editor_py))}"
         env = os.environ.copy()
         env["GIT_SEQUENCE_EDITOR"] = editor_cmd
         env["GIT_EDITOR"] = editor_cmd
-        env["GIT_HISTORY_TODO"] = str(todo_path)
-        env["GIT_HISTORY_MSG"] = str(msg_path)
-        # Run the mixed rebase outside git-history
+        env["GIT_WARP_TODO"] = str(todo_path)
+        env["GIT_WARP_MSG"] = str(msg_path)
+        # Run the mixed rebase outside git-warp
         result = subprocess.run(
             ["git", "rebase", "-i", h2],
             cwd=str(self.repo),
@@ -1521,17 +1512,6 @@ class UndoStackLabelTests(StandardAPITest):
         state = self.get("/api/state").get_json()
         entries = [e for e in state["undo_stack"] if e["label"] == "rebase"]
         self.assertGreater(len(entries), 0, "Expected a 'rebase' label for mixed operations (reword + fixup)")
-
-    @pytest.mark.release
-    def test_reset_produces_reset_label_with_message(self):
-        state = self.get("/api/state").get_json()
-        target = state["commits"][3]
-        data = self.post("/api/reset", json={"commit_hash": target["commit_hash"]}).get_json()
-        self.assertTrue(data["ok"])
-        entries = [e for e in data["undo_stack"] if e["label"].startswith("reset:")]
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["label"], f"reset: {target['message'].split(chr(10))[0]}")
-        self.assertNotIn("\n", entries[0]["label"])
 
 
 # ---------------------------------------------------------------------------
@@ -1864,7 +1844,7 @@ class PushedEndpointTests(StandardAPITest):
 class EmptyRepoEndpointTests(unittest.TestCase):
 
     def setUp(self):
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-empty-api-"))
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="git-warp-empty-api-"))
         self.repo = self.tmpdir / "repo"
         self.repo.mkdir()
         subprocess.run(["git", "init"], cwd=str(self.repo),

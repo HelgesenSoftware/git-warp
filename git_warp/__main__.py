@@ -1,3 +1,3 @@
 """Git history CLI entry point."""
-from git_history import main
+from git_warp import main
 main()
