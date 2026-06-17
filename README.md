@@ -9,7 +9,7 @@ Design goal: minimal, reliable code with no avoidable failure modes. Dependencie
 ## Install
 
 ```bash
-pip install git+https://github.com/HelgesenSoftware/git-warp
+pip install git-warp
 ```
 
 ## Usage
