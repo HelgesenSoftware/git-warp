@@ -28,7 +28,7 @@ The manual can be opened from the web UI.
 
 ## Requirements
 
-- Python >= 3.10
+- Python >= 3.7
 - Git >= 2.26
 
 ## License

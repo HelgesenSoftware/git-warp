@@ -4,13 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "git-warp"
-version = "0.1.3"
+version = "0.1.4"
 description = "Edit git commit history with full undo"
 readme = "README.md"
 license = {file = "LICENSE.md"}
-requires-python = ">=3.10"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 # Requires git >= 2.26 (for --empty=keep support in git rebase)
-dependencies = ["flask>=3.0"]
+# flask is capped at <2.3 because Flask 2.3+ dropped Python 3.7 support
+dependencies = ["flask>=2.2,<2.3"]
 
 [project.urls]
 Homepage = "http://helgesen.software"

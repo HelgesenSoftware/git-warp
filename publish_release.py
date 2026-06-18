@@ -7,7 +7,9 @@ PyPI credentials are read from the environment (TWINE_USERNAME/TWINE_PASSWORD,
 or a configured ~/.pypirc) — this script never sees or asks for the key.
 """
 
+import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -30,9 +32,17 @@ def main():
     )
     print(f"GitHub release {tag} published.")
 
+    os.remove("CHANGELOG.md")
+
+    shutil.rmtree("dist", ignore_errors=True)
     subprocess.run(["python", "-m", "build"], check=True)
     subprocess.run(["twine", "upload", "dist/*"], check=True)
     print(f"Uploaded {version} to PyPI.")
+
+    subprocess.run(["git", "switch", "develop"], check=True)
+    subprocess.run(["git", "reset", "master"], check=True)
+    subprocess.run(["git", "add", "CLAUDE.md"], check=True)
+    subprocess.run(["git", "commit", "-m", "Add CLAUDE.md"], check=True)
 
 
 if __name__ == "__main__":

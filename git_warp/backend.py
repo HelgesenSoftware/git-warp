@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import datetime
 from dataclasses import dataclass, field
@@ -150,7 +152,7 @@ class _RebaseInstructions:
     todo_lines: list
     base: str | None # None means --root
     visible_commits: list # cached commit list to avoid re-fetching in _rebase()
-    msg_path: str | None = field(default=None, kw_only=True) # temp file to unlink; reword only
+    msg_path: str | None = None # temp file to unlink; reword only
 
 
 class Git:
