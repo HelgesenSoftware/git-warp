@@ -551,7 +551,7 @@ class GitWarp:
         if self._start is not None and not self._git.is_ancestor(self._start, "HEAD"):
             raise GitWarpError(
                 "history_changed",
-                "Commit out of range; please restart git-warp.")
+                "Commit out of range; please restart git warp.")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             future_commits = executor.submit(self._list_commits)

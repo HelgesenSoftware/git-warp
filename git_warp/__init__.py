@@ -121,7 +121,7 @@ def main():
         url += "&dark=1"
     elif args.light:
         url += "&light=1"
-    print(f"git-warp running at {url}  —  Ctrl+C to quit")
+    print(f"git warp running at {url}  —  Ctrl+C to quit")
     webbrowser.open(url)
     httpd.serve_forever()
 

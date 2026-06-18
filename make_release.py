@@ -58,7 +58,15 @@ def main():
         f"Save it as CHANGELOG.md."
     )
     subprocess.run(["claude", "-p", prompt, "--allowedTools", "Write,Bash"], check=True)
-    print("CHANGELOG.md written. Review before pushing.")
+
+    print(
+        f"\nNext steps:\n"
+        f"  1. Edit CHANGELOG.md.\n"
+        f"  2. Review the changes on master since {prev or 'the start'} (e.g. via Claude Code review).\n"
+        f"     If fixes are needed, update master and move the v{version} tag.\n"
+        f"  3. git push origin master develop --tags\n"
+        f"  4. python publish_release.py {version}\n"
+    )
 
 
 if __name__ == "__main__":

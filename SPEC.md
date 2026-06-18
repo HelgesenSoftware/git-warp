@@ -1,4 +1,4 @@
-# git-warp: Specification
+# git warp: Specification
 
 See [README.md](README.md) for an overview. 
 
@@ -19,13 +19,13 @@ See [README.md](README.md) for an overview.
 1. Validate: git >= 2.26, in a repo, not detached HEAD.
 2. Pick port (auto or `--port N`), generate 32-char token (`secrets.token_urlsafe(24)`).
 3. Start Flask server on `127.0.0.1:<port>` with state starting at `HEAD~1000` (or repo root if fewer commits).
-4. Print `git-warp running at http://127.0.0.1:<port>/?t=<token>  —  Ctrl+C to quit` and open browser.
+4. Print `git warp running at http://127.0.0.1:<port>/?t=<token>  —  Ctrl+C to quit` and open browser.
 
 ## Shutdown
 
 Two triggers: Ctrl+C in terminal or Quit button (`POST /api/quit`). On Ctrl+C, the server exits normally. On quit, `os._exit(0)` is called after the response.
 
-The server never touches the repo on shutdown. Conflicted rebase state is preserved in `.git/rebase-merge`; restarting git-warp picks it up.
+The server never touches the repo on shutdown. Conflicted rebase state is preserved in `.git/rebase-merge`; restarting `git warp` picks it up.
 
 ## Security
 

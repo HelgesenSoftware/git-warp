@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>git-warp</title>
+<title>git warp</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -13,8 +13,8 @@
 <div id="columns">
   <div id="commits-panel">
     <div id="toolbar">
-      <img src="/static/logo-light.svg" id="toolbar-logo-light" alt="git-warp" class="toolbar-logo">
-      <img src="/static/logo-dark.svg" id="toolbar-logo-dark" alt="git-warp" class="toolbar-logo">
+      <img src="/static/logo-light.svg" id="toolbar-logo-light" alt="git warp" class="toolbar-logo">
+      <img src="/static/logo-dark.svg" id="toolbar-logo-dark" alt="git warp" class="toolbar-logo">
       <label for="branch-select">Branch:</label>
       <select id="branch-select"></select>
       <span id="toolbar-right">
@@ -87,7 +87,7 @@
       <li><strong>Double-click</strong> an entry to reset the branch to that state.</li>
     </ul>
     <p>The Undo Stack contains only unique modifications to the branch. If a branch is reset to a previous state, the new tip of the branch is not unique and will not be an entry in the Undo Stack. Undo, Redo and Reset actions are non-unique modifications and are not added as new entries to the Undo Stack. </p>
-    <p>The Undo Stack shows the local branch changes — commits, rebases, resets — regardless of whether they were made inside or outside git-warp.</p>
+    <p>The Undo Stack shows the local branch changes — commits, rebases, resets — regardless of whether they were made inside or outside <code>git warp</code>.</p>
     <p>When you pull or fetch/rebase from the remote, the update to the local branch appears as a single entry in the Undo Stack, not as a series of individual remote commits.</p>
     <p><em>Tip: A failed rebase can be recovered by executing "git rebase --abort".</em></p>
     <div class="modal-actions">

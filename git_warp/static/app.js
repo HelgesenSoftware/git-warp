@@ -103,7 +103,7 @@
     const resp = await fetch(url, opts);
     if (resp.status === 403) {
       sessionStorage.removeItem("git_warp_token");
-      throw new Error("This git-warp tab has expired. Switch tab or restart git-warp");
+      throw new Error("This git warp tab has expired. Switch tab or restart git warp");
     }
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
@@ -708,7 +708,7 @@
       }
       if (data.ok && data.submodule_update_suggested) {
         showModal("Submodule pointers have changed. Run git submodule update --init? " +
-                  "Refusing leaves the working tree dirty, which disables git-warp.", false).then(async function (ok) {
+                  "Refusing leaves the working tree dirty, which disables git warp.", false).then(async function (ok) {
           if (!ok) return;
           await spinnerCall("POST", "/api/submodule/update");
         });

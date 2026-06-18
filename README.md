@@ -1,4 +1,4 @@
-# git-warp
+# git warp
 
 Rewrite git history in your browser — drag to reorder, squash, fixup, reword, and split commits, with unlimited undo.
 
@@ -12,12 +12,14 @@ Design goal: minimal, reliable code with no avoidable failure modes. Dependencie
 pip install git-warp
 ```
 
+This installs the `git-warp` program, which git automatically exposes as the `git warp` subcommand.
+
 ## Usage
 
 Run from inside any git repository:
 
 ```bash
-git-warp
+git warp
 ```
 
 This opens your browser to a local page where you can view and rewrite your commit history. From there, open the manual for details.
