@@ -37,27 +37,38 @@ def _setup_ui_server(tmp_path_factory, prefix):
                    capture_output=True, check=True)
     subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(repo),
                    capture_output=True, check=True)
+    branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo),
+                             capture_output=True, check=True, text=True).stdout.strip()
+    initial_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                                   capture_output=True, check=True, text=True).stdout.strip()
     app = create_app(str(repo), TOKEN)
     server = make_server("127.0.0.1", 0, app)
     port = server.server_port
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield {"url": f"http://127.0.0.1:{port}/?t={TOKEN}", "repo": repo}
+    yield {
+        "url": f"http://127.0.0.1:{port}/?t={TOKEN}",
+        "repo": repo,
+        "branch": branch,
+        "initial_head": initial_head,
+    }
     server.shutdown()
+
+
+def _restore_ui_repo(server):
+    """Undo whatever the previous phase did, back to the fixture's initial commit."""
+    repo = server["repo"]
+    subprocess.run(["git", "rebase", "--abort"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "checkout", server["branch"]], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "reset", "--hard", server["initial_head"]], cwd=str(repo),
+                    capture_output=True, check=True)
+    subprocess.run(["git", "clean", "-fd"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "submodule", "update", "--init", "--force"],
+                    cwd=str(repo), capture_output=True)
 
 
 @pytest.fixture
 def ui_live_server(tmp_path_factory):
     yield from _setup_ui_server(tmp_path_factory, "ui-work")
-
-
-@pytest.fixture
-def ui_drag_server(tmp_path_factory):
-    yield from _setup_ui_server(tmp_path_factory, "ui-drag")
-
-
-@pytest.fixture
-def ui_conflict_server(tmp_path_factory):
-    yield from _setup_ui_server(tmp_path_factory, "ui-conflict")
 
 
 def _row(page, message):
@@ -129,7 +140,7 @@ def _selected_idx(page):
 
 
 @pytest.mark.release
-def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
+def test_all_ui(page, ui_live_server):
     # Live server tests (all use the same page, continuous mutations)
     page.goto(ui_live_server["url"])
     page.wait_for_selector(".commit-row")
@@ -254,8 +265,9 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
     page.wait_for_selector("#btn-stash", state="visible")
     assert page.locator("#btn-stash").is_visible()
 
-    # Drag server tests (new page via goto)
-    page.goto(ui_drag_server["url"])
+    # Drag tests (repo restored to its initial state, same server)
+    _restore_ui_repo(ui_live_server)
+    page.goto(ui_live_server["url"])
     page.wait_for_selector(".commit-row")
 
     # Section 12: Drag to same position is noop (non-mutating, run first)
@@ -353,8 +365,9 @@ def test_all_ui(page, ui_live_server, ui_drag_server, ui_conflict_server):
     }""")
     assert selected_msg == msg_at_2
 
-    # Conflict server tests (new page via goto)
-    page.goto(ui_conflict_server["url"])
+    # Conflict tests (repo restored to its initial state, same server)
+    _restore_ui_repo(ui_live_server)
+    page.goto(ui_live_server["url"])
     page.wait_for_selector(".commit-row")
     initial_count = page.locator(".commit-row").count()
 

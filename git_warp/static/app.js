@@ -49,6 +49,8 @@
   const $undoStackList  = document.getElementById("undo-stack-list");
   const $undoStackExpiry = document.getElementById("undo-stack-expiry");
   const $conflictModal = document.getElementById("conflict-modal");
+  const $conflictModalTitle = document.getElementById("conflict-modal-title");
+  const $conflictModalText = document.getElementById("conflict-modal-text");
   const $conflictFiles = document.getElementById("conflict-files");
   const $btnAbort    = document.getElementById("btn-abort");
   const $btnContinue = document.getElementById("btn-continue");
@@ -160,10 +162,7 @@
     if (state.dirty && !state.rebase_in_progress) {
       showBanner("Working tree has uncommitted changes.", "warning");
       $btnStash.classList.remove("hidden");
-    } else if (state.rebase_in_progress && state.conflict_files.length === 0) {
-      showBanner("A rebase is in progress. Finish or abort it in your terminal to continue.", "warning");
-      $btnStash.classList.add("hidden");
-    } else if (!state.branch) {
+    } else if (!state.branch && !state.rebase_in_progress) {
       showBanner("HEAD is detached. Select a branch from the dropdown.", "warning");
       $btnStash.classList.add("hidden");
     } else {
@@ -173,14 +172,23 @@
     if (!state.has_stash || state.dirty) $btnStashPop.classList.add("hidden");
     else $btnStashPop.classList.remove("hidden");
 
-    // Conflict modal
-    if (state.rebase_in_progress && state.conflict_files.length > 0) {
-      $conflictFiles.innerHTML = "";
-      state.conflict_files.forEach(function (f) {
-        const li = document.createElement("li");
-        li.textContent = f;
-        $conflictFiles.appendChild(li);
-      });
+    // Conflict / paused-rebase modal
+    if (state.rebase_in_progress) {
+      if (state.conflict_files.length > 0) {
+        $conflictModalTitle.textContent = "Merge conflict";
+        $conflictModalText.textContent = "Resolve in your editor, then:";
+        $conflictFiles.innerHTML = "";
+        state.conflict_files.forEach(function (f) {
+          const li = document.createElement("li");
+          li.textContent = f;
+          $conflictFiles.appendChild(li);
+        });
+        $conflictFiles.classList.remove("hidden");
+      } else {
+        $conflictModalTitle.textContent = "Rebase paused";
+        $conflictModalText.textContent = "The rebase stopped without a conflict.";
+        $conflictFiles.classList.add("hidden");
+      }
       $conflictModal.classList.remove("hidden");
     } else {
       $conflictModal.classList.add("hidden");

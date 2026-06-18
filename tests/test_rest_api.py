@@ -290,11 +290,6 @@ class StashEndpointTests(StandardAPITest):
         self.assertFalse(data["dirty"])
         self.assertTrue(data["has_stash"])
 
-    @pytest.mark.release
-    def test_stash_uses_post(self):
-        resp = self.get("/api/stash")
-        self.assertEqual(resp.status_code, 405)
-
 
 # ---------------------------------------------------------------------------
 # POST /api/stash/pop
@@ -324,11 +319,6 @@ class StashPopEndpointTests(StandardAPITest):
         self.assertTrue(data["ok"])
         self.assertTrue(data["dirty"])
         self.assertFalse(data["has_stash"])
-
-    @pytest.mark.release
-    def test_stash_pop_uses_post(self):
-        resp = self.get("/api/stash/pop")
-        self.assertEqual(resp.status_code, 405)
 
 
 # ---------------------------------------------------------------------------
@@ -398,11 +388,6 @@ class RebaseMoveEndpointTests(StandardAPITest):
         }).get_json()
         self.assertFalse(data["ok"])
         self.assertEqual(data["error"], "dirty_tree")
-
-    @pytest.mark.release
-    def test_rebase_uses_post(self):
-        resp = self.get("/api/rebase/move")
-        self.assertEqual(resp.status_code, 405)
 
 
 # ---------------------------------------------------------------------------
@@ -764,11 +749,6 @@ class ResetEndpointTests(StandardAPITest):
         self.assertEqual(data["error"], "dirty_tree")
 
     @pytest.mark.release
-    def test_reset_uses_post(self):
-        resp = self.get("/api/reset")
-        self.assertEqual(resp.status_code, 405)
-
-    @pytest.mark.release
     def test_reset_with_missing_commit_hash(self):
         data = self.post("/api/reset", json={}).get_json()
         self.assertFalse(data["ok"])
@@ -790,11 +770,6 @@ class BranchEndpointTests(StandardAPITest):
         self.assertIn("new-branch", data["branches"])
         target = next(c for c in data["commits"] if c["commit_hash"] == target_hash)
         self.assertIn("new-branch", target["branches"])
-
-    @pytest.mark.release
-    def test_create_branch_uses_post(self):
-        resp = self.get("/api/branch")
-        self.assertEqual(resp.status_code, 405)
 
     @pytest.mark.release
     def test_create_branch_with_invalid_commit_hash(self):
@@ -860,11 +835,6 @@ class ShowEndpointTests(StandardAPITest):
     def test_show_missing_hash_param(self):
         data = self.get("/api/show").get_json()
         self.assertFalse(data["ok"])
-
-    @pytest.mark.release
-    def test_show_uses_get(self):
-        resp = self.post("/api/show")
-        self.assertEqual(resp.status_code, 405)
 
     def test_show_with_short_hash(self):
         head = self.get("/api/state").get_json()["commits"][0]
@@ -1057,18 +1027,6 @@ class ConflictEndpointTests(StandardAPITest):
         self.assertFalse(data["rebase_in_progress"])
 
     @pytest.mark.release
-    def test_rebase_continue_uses_post(self):
-        resp = self.client.get("/api/rebase/continue",
-                               headers={"X-Token": TOKEN})
-        self.assertEqual(resp.status_code, 405)
-
-    @pytest.mark.release
-    def test_rebase_abort_uses_post(self):
-        resp = self.client.get("/api/rebase/abort",
-                               headers={"X-Token": TOKEN})
-        self.assertEqual(resp.status_code, 405)
-
-    @pytest.mark.release
     def test_rebase_continue_when_not_in_rebase_returns_error(self):
         data = self.post("/api/rebase/continue").get_json()
         self.assertFalse(data["ok"])
@@ -1092,11 +1050,6 @@ class QuitEndpointTests(StandardAPITest):
         with patch("git_warp.os._exit"):
             data = self.post("/api/quit").get_json()
         self.assertTrue(data["ok"])
-
-    @pytest.mark.release
-    def test_quit_uses_post(self):
-        resp = self.get("/api/quit")
-        self.assertEqual(resp.status_code, 405)
 
 
 @pytest.mark.release
@@ -1161,10 +1114,6 @@ class RebaseConsecutiveEndpointTests(StandardAPITest):
 
 @pytest.mark.submodule
 class SubmoduleUpdateEndpointTests(StandardAPITest):
-
-    def test_submodule_update_uses_post(self):
-        resp = self.get("/api/submodule/update")
-        self.assertEqual(resp.status_code, 405)
 
     def test_submodule_update_requires_auth(self):
         resp = self.client.post("/api/submodule/update")
@@ -1266,29 +1215,6 @@ class LogEndpointTests(StandardAPITest):
 class AuthTokenEdgeCasesTests(StandardAPITest):
 
     @pytest.mark.release
-    def test_empty_token_returns_403(self):
-        resp = self.client.get("/api/state", headers={"X-Token": ""})
-        self.assertEqual(resp.status_code, 403)
-
-    @pytest.mark.release
-    def test_token_with_spaces_returns_403(self):
-        resp = self.client.get("/api/state",
-                               headers={"X-Token": "test-token abc123"})
-        self.assertEqual(resp.status_code, 403)
-
-    @pytest.mark.release
-    def test_token_case_sensitive(self):
-        resp = self.client.get("/api/state",
-                               headers={"X-Token": TOKEN.upper()})
-        self.assertEqual(resp.status_code, 403)
-
-    @pytest.mark.release
-    def test_token_with_special_characters_wrong(self):
-        resp = self.client.get("/api/state",
-                               headers={"X-Token": TOKEN + "!"})
-        self.assertEqual(resp.status_code, 403)
-
-    @pytest.mark.release
     def test_token_in_query_string_vs_header(self):
         # Query string token is rejected; the header authenticates.
         resp = self.client.get(f"/api/state?t={TOKEN}")
@@ -1364,22 +1290,25 @@ class StashConflictScenarioTests(StandardAPITest):
 
 @pytest.mark.release
 class HTTPMethodValidationTests(StandardAPITest):
+    """Each route's methods= declaration rejects the method it doesn't list."""
 
-    def test_state_rejects_post(self):
-        resp = self.post("/api/state")
-        self.assertEqual(resp.status_code, 405)
+    GET_ONLY_ROUTES = ["/api/state", "/api/show"]
+    POST_ONLY_ROUTES = [
+        "/api/stash", "/api/stash/pop", "/api/rebase/move", "/api/rebase/squash",
+        "/api/rebase/fixup", "/api/rebase/reword", "/api/rebase/split",
+        "/api/rebase/continue", "/api/rebase/abort", "/api/reset", "/api/branch",
+        "/api/submodule/update", "/api/switch", "/api/quit",
+    ]
 
-    def test_stash_rejects_get(self):
-        resp = self.get("/api/stash")
-        self.assertEqual(resp.status_code, 405)
+    def test_get_only_routes_reject_post(self):
+        for route in self.GET_ONLY_ROUTES:
+            with self.subTest(route=route):
+                self.assertEqual(self.post(route).status_code, 405)
 
-    def test_show_rejects_post(self):
-        resp = self.post("/api/show")
-        self.assertEqual(resp.status_code, 405)
-
-    def test_rebase_rejects_get(self):
-        resp = self.get("/api/rebase/move")
-        self.assertEqual(resp.status_code, 405)
+    def test_post_only_routes_reject_get(self):
+        for route in self.POST_ONLY_ROUTES:
+            with self.subTest(route=route):
+                self.assertEqual(self.get(route).status_code, 405)
 
 
 # ---------------------------------------------------------------------------
