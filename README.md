@@ -1,7 +1,7 @@
 # git warp
 
 Rewrite git history in your browser with unlimited undo.
-reorder, squash, fixup, reword, and split commits, 
+Reorder, squash, fixup, reword, and split commits.
 
 Run git warp from inside any git repository, after stashing or committing changes. The Web UI uses the installed git version to rewrite history and provide full undo. 
 
@@ -12,7 +12,7 @@ Run git warp from inside any git repository, after stashing or committing change
 pip install git-warp
 ```
 
-This installs `git warp` subcommand.
+This installs the `git warp` subcommand.
 
 ## Usage
 
