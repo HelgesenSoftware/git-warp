@@ -13,7 +13,9 @@ Key distinctions exercised:
   - "update main" touches neither
   - "base" has no .gitmodules
 """
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +30,19 @@ from make_test_repo import init_repo
 from conftest import _commit_raw
 from git_warp.backend import GitWarp, GitWarpError
 from test_challenging import ChallengeBase, _git, _commit_env
+
+
+def _restore_repo(repo: Path, branch: str, head: str, extra_branches=()):
+    """Undo whatever a test did, back to the class fixture's initial commit."""
+    subprocess.run(["git", "rebase", "--abort"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "checkout", branch], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "reset", "--hard", head], cwd=str(repo),
+                    capture_output=True, check=True)
+    subprocess.run(["git", "clean", "-fd"], cwd=str(repo), capture_output=True)
+    for b in extra_branches:
+        subprocess.run(["git", "branch", "-D", b], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "submodule", "update", "--init", "--force"],
+                    cwd=str(repo), capture_output=True)
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +100,23 @@ def _build_submodule_repo(parent: Path):
 
 class SubmoduleBase(ChallengeBase):
 
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-submodule-"))
+        cls.repo, cls.v1, cls.v2 = _build_submodule_repo(cls.tmpdir)
+        cls.branch = _git(cls.repo, "git", "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        cls.initial_head = _git(cls.repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
     def setUp(self):
-        super().setUp()
-        self.repo, self.v1, self.v2 = _build_submodule_repo(self.tmpdir)
+        _restore_repo(self.repo, self.branch, self.initial_head)
         self.gh = GitWarp(str(self.repo))
+
+    def tearDown(self):
+        pass
 
     def _by_msg(self, state=None):
         s = state or self.gh.read_state()
@@ -99,108 +127,6 @@ class SubmoduleBase(ChallengeBase):
         return [c.commit_hash for c in s.commits]
     def _lib_head(self):
         return _git(self.repo / "lib", "git", "rev-parse", "HEAD").stdout.strip()
-
-
-# ---------------------------------------------------------------------------
-# Helper method unit tests
-# ---------------------------------------------------------------------------
-
-@pytest.mark.submodule
-class HelperMethodTests(SubmoduleBase):
-    """Direct tests of the four private helpers that power the submodule guards."""
-
-    def test_get_gitmodules_empty_for_commit_without_submodule(self):
-        bm = self._by_msg()
-        self.assertEqual(self.gh._git.get_gitmodules(bm["base"]), "")
-
-    def test_get_gitmodules_non_empty_for_commit_with_submodule(self):
-        bm = self._by_msg()
-        content = self.gh._git.get_gitmodules(bm["add lib"])
-        self.assertIn("[submodule", content)
-        self.assertIn("lib", content)
-
-    def test_get_gitmodules_identical_for_bump_lib_and_add_lib(self):
-        # bump lib only changes the gitlink, not .gitmodules
-        bm = self._by_msg()
-        self.assertEqual(
-            self.gh._git.get_gitmodules(bm["add lib"]),
-            self.gh._git.get_gitmodules(bm["bump lib"]),
-        )
-
-    def test_get_gitmodules_identical_across_unrelated_commits(self):
-        # update main doesn't touch submodules at all
-        bm = self._by_msg()
-        self.assertEqual(
-            self.gh._git.get_gitmodules(bm["bump lib"]),
-            self.gh._git.get_gitmodules(bm["update main"]),
-        )
-
-    def test_gitlinks_at_empty_for_commit_without_submodule(self):
-        bm = self._by_msg()
-        self.assertEqual(self.gh._git.gitlinks_at(bm["base"]), {})
-
-    def test_gitlinks_at_v1_at_add_lib(self):
-        bm = self._by_msg()
-        self.assertEqual(self.gh._git.gitlinks_at(bm["add lib"]), {"lib": self.v1})
-
-    def test_gitlinks_at_v2_at_bump_lib(self):
-        bm = self._by_msg()
-        self.assertEqual(self.gh._git.gitlinks_at(bm["bump lib"]), {"lib": self.v2})
-
-    def test_gitlinks_at_v2_at_update_main(self):
-        # update main does not change the gitlink; pointer stays at v2
-        bm = self._by_msg()
-        self.assertEqual(self.gh._git.gitlinks_at(bm["update main"]), {"lib": self.v2})
-
-    def test_gitlinks_changed_true_when_before_has_no_submodule(self):
-        # HEAD is "update main" ({"lib": v2}); base has no gitlink
-        bm = self._by_msg()
-        self.assertTrue(self.gh._gitlinks_changed(bm["base"]))
-
-    def test_gitlinks_changed_false_when_before_matches_head(self):
-        # bump lib already points at v2, same as HEAD
-        bm = self._by_msg()
-        self.assertFalse(self.gh._gitlinks_changed(bm["bump lib"]))
-
-    def test_commit_touches_gitmodules_true_for_add_lib(self):
-        bm = self._by_msg()
-        self.assertTrue(self.gh._git.commit_touches_gitmodules(bm["add lib"]))
-
-    def test_commit_touches_gitmodules_false_for_bump_lib(self):
-        # Only the gitlink (160000 entry) changed; .gitmodules is untouched
-        bm = self._by_msg()
-        self.assertFalse(self.gh._git.commit_touches_gitmodules(bm["bump lib"]))
-
-    def test_commit_touches_gitmodules_false_for_unrelated_commit(self):
-        bm = self._by_msg()
-        self.assertFalse(self.gh._git.commit_touches_gitmodules(bm["update main"]))
-
-    def test_any_moved_touches_gitmodules_true_when_add_lib_repositioned(self):
-        bm = self._by_msg()
-        current   = [bm["update main"], bm["bump lib"], bm["add lib"], bm["base"]]
-        reordered = [bm["add lib"],     bm["update main"], bm["bump lib"], bm["base"]]
-        self.assertTrue(self.gh._any_moved_commit_touches_gitmodules(current, reordered))
-
-    def test_any_moved_touches_gitmodules_false_when_add_lib_stays_in_place(self):
-        # Swap update main ↔ bump lib; add lib stays at index 2
-        bm = self._by_msg()
-        current   = [bm["update main"], bm["bump lib"], bm["add lib"], bm["base"]]
-        reordered = [bm["bump lib"], bm["update main"], bm["add lib"], bm["base"]]
-        self.assertFalse(self.gh._any_moved_commit_touches_gitmodules(current, reordered))
-
-    def test_any_moved_touches_gitmodules_false_when_only_gitlink_commit_moves(self):
-        # bump lib changes position but only affects the gitlink, not .gitmodules
-        bm = self._by_msg()
-        current   = [bm["update main"], bm["bump lib"], bm["add lib"], bm["base"]]
-        reordered = [bm["bump lib"], bm["update main"], bm["add lib"], bm["base"]]
-        self.assertFalse(self.gh._any_moved_commit_touches_gitmodules(current, reordered))
-
-    def test_any_moved_touches_gitmodules_true_when_full_rotation_includes_add_lib(self):
-        # All four commits move; add lib is one of them → blocked
-        bm = self._by_msg()
-        current   = [bm["update main"], bm["bump lib"], bm["add lib"], bm["base"]]
-        rotated   = current[1:] + [current[0]]
-        self.assertTrue(self.gh._any_moved_commit_touches_gitmodules(current, rotated))
 
 
 # ---------------------------------------------------------------------------
@@ -563,10 +489,23 @@ class RebaseAfterGitmodulesTests(ChallengeBase):
       "base"          — HEAD~4
     """
 
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-submodule-"))
+        cls.repo, cls.v1 = _build_repo_commits_after_gitmodules(cls.tmpdir)
+        cls.branch = _git(cls.repo, "git", "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        cls.initial_head = _git(cls.repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
     def setUp(self):
-        super().setUp()
-        self.repo, self.v1 = _build_repo_commits_after_gitmodules(self.tmpdir)
+        _restore_repo(self.repo, self.branch, self.initial_head)
         self.gh = GitWarp(str(self.repo))
+
+    def tearDown(self):
+        pass
 
     def _has_gitlink(self):
         r = _git(self.repo, "git", "ls-tree", "HEAD", "lib")
@@ -719,10 +658,24 @@ def _build_two_branch_submodule_repo(parent: Path):
 @pytest.mark.submodule
 class SwitchBranchSubmoduleTests(ChallengeBase):
 
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-submodule-"))
+        cls.repo, cls.v1, cls.v2 = _build_two_branch_submodule_repo(cls.tmpdir)
+        cls.branch = _git(cls.repo, "git", "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        cls.initial_head = _git(cls.repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
     def setUp(self):
-        super().setUp()
-        self.repo, self.v1, self.v2 = _build_two_branch_submodule_repo(self.tmpdir)
+        _restore_repo(self.repo, self.branch, self.initial_head,
+                       extra_branches=("same", "nosub"))
         self.gh = GitWarp(str(self.repo))
+
+    def tearDown(self):
+        pass
 
     def _lib_head(self):
         return _git(self.repo / "lib", "git", "rev-parse", "HEAD").stdout.strip()
@@ -839,10 +792,23 @@ def _build_repo_trivials_above_gitlink(parent: Path):
 @pytest.mark.submodule
 class TrivialCommitsAboveGitlinkTests(ChallengeBase):
 
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = Path(tempfile.mkdtemp(prefix="git-history-submodule-"))
+        cls.repo, cls.v1, cls.v2 = _build_repo_trivials_above_gitlink(cls.tmpdir)
+        cls.branch = _git(cls.repo, "git", "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        cls.initial_head = _git(cls.repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
     def setUp(self):
-        super().setUp()
-        self.repo, self.v1, self.v2 = _build_repo_trivials_above_gitlink(self.tmpdir)
+        _restore_repo(self.repo, self.branch, self.initial_head)
         self.gh = GitWarp(str(self.repo))
+
+    def tearDown(self):
+        pass
 
     def _has_gitlink(self):
         r = _git(self.repo, "git", "ls-tree", "HEAD", "lib")

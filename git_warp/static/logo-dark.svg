@@ -98,7 +98,7 @@
         C281.252,499.825,303.411,510.24,325.776,520.754z"/>
   </svg>
 
-  <!-- git-warp text -->
+  <!-- git warp text -->
   <text
     x="114"
     y="62"
@@ -106,5 +106,5 @@
     font-size="64"
     letter-spacing="-1"
     fill="#d0d0d0"
-  >git-warp</text>
+  >git warp</text>
 </svg>

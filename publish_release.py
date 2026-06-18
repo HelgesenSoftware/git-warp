@@ -22,6 +22,8 @@ def main():
     tag = f"v{version}"
     subprocess.run(["git", "rev-parse", tag], check=True, capture_output=True, text=True)
 
+    subprocess.run(["git", "push", "origin", "master", tag], check=True)
+
     subprocess.run(
         ["gh", "release", "create", tag, "--title", version, "--notes-file", "CHANGELOG.md", "--latest"],
         check=True,

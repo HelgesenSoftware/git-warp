@@ -93,7 +93,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .drag-ghost { position: absolute; top: -10000px; left: 0; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.3); pointer-events: none; }
 
 /* Undo stack row */
-.undo-stack-row { display: flex; align-items: center; gap: 6px; padding: 4px 16px; min-height: 32px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 14px; user-select: none; }
+.undo-stack-row { display: flex; align-items: center; gap: 6px; padding: 4px 16px; min-height: 32px; border-bottom: 1px solid #f0f0f0; cursor: default; font-size: 14px; user-select: none; }
 .undo-stack-row:hover { background: #eee; }
 .undo-stack-row .undo-stack-hash { font-family: monospace; color: #888; font-size: 12px; flex-shrink: 0; }
 .undo-stack-row .undo-stack-label { color: #444; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
